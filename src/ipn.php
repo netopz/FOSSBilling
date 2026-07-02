@@ -22,7 +22,16 @@ $di = include Path::join(PATH_ROOT, 'di.php');
 $di['translate']();
 $apiResponseFactory = new ApiResponseFactory();
 
-$invoiceID = $request->get('invoice_id');
+$rawBody = $request->getContent();
+$stripeMetadata = [];
+if ($rawBody !== '') {
+    $jsonPayload = json_decode($rawBody, true);
+    if (is_array($jsonPayload)) {
+        $stripeMetadata = $jsonPayload['data']['object']['metadata'] ?? [];
+    }
+}
+
+$invoiceID = $request->get('invoice_id') ?? ($stripeMetadata['invoice_id'] ?? null);
 if ($invoiceID !== null) {
     $invoiceID = filter_var($invoiceID, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
     if ($invoiceID === false) {
@@ -30,7 +39,7 @@ if ($invoiceID !== null) {
     }
 }
 
-$gatewayID = $request->get('gateway_id');
+$gatewayID = $request->get('gateway_id') ?? ($stripeMetadata['gateway_id'] ?? null);
 
 if ($gatewayID !== null) {
     $gatewayID = filter_var($gatewayID, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
@@ -38,8 +47,6 @@ if ($gatewayID !== null) {
         emitResponse(new JsonResponse(['result' => null, 'error' => ['message' => 'Invalid gateway ID']], 400));
     }
 }
-
-$rawBody = $request->getContent();
 
 $ipn = [
     'invoice_id' => $invoiceID,

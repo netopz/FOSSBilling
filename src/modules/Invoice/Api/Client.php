@@ -143,4 +143,37 @@ class Client extends \FOSSBilling\Api\AbstractApi
 
         return $service->getTaxRateForClient($this->identity);
     }
+
+    /**
+     * Create a Stripe PaymentIntent for direct frontend confirmation.
+     */
+    #[RequiredParams(['hash' => 'Invoice hash was not passed', 'gateway_id' => 'Payment gateway ID was not passed'])]
+    public function stripe_direct_intent($data): array
+    {
+        $identity = $this->getIdentity();
+        $invoice = $this->di['db']->findOne('Invoice', 'hash = :hash AND client_id = :client_id', [
+            'hash' => $data['hash'],
+            'client_id' => $identity->id,
+        ]);
+        if (!$invoice instanceof \Model_Invoice) {
+            throw new \FOSSBilling\Exception('Invoice was not found');
+        }
+        if ($invoice->status === \Model_Invoice::STATUS_PAID) {
+            throw new \FOSSBilling\InformationException('Invoice is already paid');
+        }
+
+        $gateway = $this->di['db']->getExistingModelById('PayGateway', $data['gateway_id'], 'Payment gateway not found');
+        if ($gateway->gateway !== 'Stripe') {
+            throw new \FOSSBilling\InformationException('Stripe payment gateway is required');
+        }
+
+        $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
+        $adapter = $payGatewayService->getPaymentAdapter($gateway, $invoice);
+
+        if (!method_exists($adapter, 'createDirectPaymentIntent')) {
+            throw new \FOSSBilling\Exception('Stripe Direct is not supported by this gateway');
+        }
+
+        return $adapter->createDirectPaymentIntent($invoice, $gateway);
+    }
 }

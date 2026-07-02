@@ -157,6 +157,17 @@ class Mail
                 $dsn = 'sendgrid://' . $options['sendgrid_key'] . '@default';
 
                 break;
+            case 'mailgun':
+                if (empty($options['mailgun_key'])) {
+                    throw new InformationException('A Mailgun API key is required to send emails via Mailgun');
+                }
+                if (empty($options['mailgun_domain'])) {
+                    throw new InformationException('A Mailgun sending domain is required to send emails via Mailgun');
+                }
+                $region = $options['mailgun_region'] ?? 'us';
+                $dsn = 'mailgun+api://' . urlencode($options['mailgun_key']) . ':' . urlencode($options['mailgun_domain']) . '@default?region=' . urlencode($region);
+
+                break;
             case 'custom':
                 if (empty($this->dsn)) {
                     throw new InformationException("Unable to send email: 'Custom' transport method was selected without a custom DSN");
