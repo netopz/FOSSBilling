@@ -3,7 +3,6 @@
 declare(strict_types=1);
 /**
  * Copyright 2022-2025 FOSSBilling
- * Copyright 2011-2021 BoxBilling, Inc.
  * SPDX-License-Identifier: Apache-2.0.
  *
  * @copyright FOSSBilling (https://www.fossbilling.org)
@@ -21,8 +20,8 @@ use Symfony\Component\Filesystem\Path;
 
 class Tools
 {
-    private readonly Filesystem $filesystem;
     protected ?\Pimple\Container $di = null;
+    private Filesystem $filesystem;
 
     public function __construct()
     {
@@ -32,6 +31,9 @@ class Tools
     public function setDi(\Pimple\Container $di): void
     {
         $this->di = $di;
+        if (isset($di['filesystem'])) {
+            $this->filesystem = $di['filesystem'];
+        }
     }
 
     public function getDi(): ?\Pimple\Container
@@ -265,14 +267,6 @@ class Tools
         ]);
 
         return $port === false ? $default : $port;
-    }
-
-    public static function isHTTPS(): bool
-    {
-        $protocol = $_SERVER['HTTPS'] ?? $_SERVER['REQUEST_SCHEME'] ?? '';
-
-        // $_SERVER['HTTPS'] will be set to `on` to indicate HTTPS and REQUEST_SCHEME may be set to `https`, so either one means we are connected via HTTPS.
-        return strcasecmp((string) $protocol, 'on') === 0 || strcasecmp((string) $protocol, 'https') === 0;
     }
 
     /**

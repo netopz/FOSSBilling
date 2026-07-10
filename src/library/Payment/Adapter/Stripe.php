@@ -3,7 +3,6 @@
 declare(strict_types=1);
 /**
  * Copyright 2022-2025 FOSSBilling
- * Copyright 2011-2021 BoxBilling, Inc.
  * SPDX-License-Identifier: Apache-2.0.
  *
  * @copyright FOSSBilling (https://www.fossbilling.org)
@@ -121,6 +120,42 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
                     ],
                 ],
             ],
+        ];
+    }
+
+    public function getPublishableKey(): string
+    {
+        return ($this->config['test_mode']) ? $this->config['test_pub_key'] : $this->config['pub_key'];
+    }
+
+    public function createDirectPaymentIntent(Model_Invoice $invoice, Model_PayGateway $gateway): array
+    {
+        $amount = $this->getAmountInCents($invoice);
+        $intent = $this->stripe->paymentIntents->create([
+            'amount' => $amount,
+            'currency' => strtolower((string) $invoice->currency),
+            'description' => $this->getInvoiceTitle($invoice),
+            'automatic_payment_methods' => ['enabled' => true],
+            'receipt_email' => $invoice->buyer_email,
+            'metadata' => [
+                'client_id' => (string) $invoice->client_id,
+                'invoice_id' => (string) $invoice->id,
+                'invoice_hash' => (string) $invoice->hash,
+                'gateway_id' => (string) $gateway->id,
+            ],
+        ], [
+            'idempotency_key' => sprintf('vf_invoice_%s_%s', $invoice->id, $amount),
+        ]);
+
+        return [
+            'publishable_key' => $this->getPublishableKey(),
+            'client_secret' => $intent->client_secret,
+            'payment_intent_id' => $intent->id,
+            'amount' => $amount,
+            'currency' => strtolower((string) $invoice->currency),
+            'invoice_id' => (int) $invoice->id,
+            'invoice_hash' => (string) $invoice->hash,
+            'gateway_id' => (int) $gateway->id,
         ];
     }
 

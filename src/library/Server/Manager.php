@@ -5,7 +5,6 @@ use Random\RandomException;
 
 /**
  * Copyright 2022-2025 FOSSBilling
- * Copyright 2011-2021 BoxBilling, Inc.
  * SPDX-License-Identifier: Apache-2.0.
  *
  * @copyright FOSSBilling (https://www.fossbilling.org)
@@ -167,8 +166,6 @@ abstract class Server_Manager
      * Sets the logger object.
      *
      * @param Box_Log $value the logger object
-     *
-     * @return $this
      */
     public function setLog(Box_Log $value): static
     {

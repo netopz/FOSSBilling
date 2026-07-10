@@ -833,11 +833,26 @@ test('getSoonExpiringActiveOrdersQuery builds expected SQL and bindings', functi
                 AND co.invoice_option = :invoice_option
                 AND co.period IS NOT NULL
                 AND co.expires_at IS NOT NULL
-                AND i.id IS NULL AND co.client_id = :client_id HAVING DATEDIFF(co.expires_at, NOW()) <= :days_until_expiration ORDER BY co.client_id DESC';
+                AND i.id IS NULL
+                /* Pair non-executed renewal items with paid invoices to skip renewals already queued for activation. */
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM invoice_item pending_item
+                    INNER JOIN invoice pending_invoice ON pending_invoice.id = pending_item.invoice_id
+                    WHERE pending_item.rel_id = co.id
+                    AND pending_item.type = :pending_item_type
+                    AND pending_item.task = :pending_item_task
+                    AND pending_item.status != :pending_item_status
+                    AND pending_invoice.status = :pending_invoice_status
+                ) AND co.client_id = :client_id HAVING DATEDIFF(co.expires_at, NOW()) <= :days_until_expiration ORDER BY co.client_id DESC';
 
     $expectedBindings = [
         ':client_id' => $randId,
         ':unpaid_invoice_status' => Model_Invoice::STATUS_UNPAID,
+        ':pending_item_type' => Model_InvoiceItem::TYPE_ORDER,
+        ':pending_item_task' => Model_InvoiceItem::TASK_RENEW,
+        ':pending_item_status' => Model_InvoiceItem::STATUS_EXECUTED,
+        ':pending_invoice_status' => Model_Invoice::STATUS_PAID,
         ':status' => Model_ClientOrder::STATUS_ACTIVE,
         ':invoice_option' => 'issue-invoice',
         ':days_until_expiration' => $randId,
@@ -941,7 +956,9 @@ test('toApiArray returns expected keys', function (): void {
     $clientService->shouldReceive('toApiArray')->atLeast()->once()->andReturn([]);
 
     $supportService = Mockery::mock(Box\Mod\Support\Service::class);
-    $supportService->shouldReceive('getActiveTicketsCountForOrder')->atLeast()->once()->andReturn(1);
+    $supportTicketRepo = Mockery::mock(Box\Mod\Support\Repository\SupportTicketRepository::class);
+    $supportTicketRepo->shouldReceive('countActiveTicketsForOrder')->atLeast()->once()->andReturn(1);
+    $supportService->shouldReceive('getSupportTicketRepository')->atLeast()->once()->andReturn($supportTicketRepo);
 
     $dbMock = Mockery::mock(Box_Database::class);
     $dbMock->shouldReceive('toArray')->atLeast()->once()->andReturn([]);
@@ -1652,7 +1669,14 @@ test('activateOrder throws for non-pending order', function (): void {
     $clientOrderModel->loadBean(new Tests\Helpers\DummyBean());
     $clientOrderModel->status = Model_ClientOrder::STATUS_CANCELED;
 
+    $dbMock = Mockery::mock(Box_Database::class);
+    $dbMock->shouldReceive('load')->atLeast()->once()->with('ClientOrder', Mockery::any())->andReturn($clientOrderModel);
+
+    $di = container();
+    $di['db'] = $dbMock;
+
     $svc = new Service();
+    $svc->setDi($di);
 
     expect(fn (): bool => $svc->activateOrder($clientOrderModel))
         ->toThrow(FOSSBilling\Exception::class, 'Only pending setup or failed orders can be activated');
@@ -1664,10 +1688,14 @@ test('activateOrder activates pending order', function (): void {
     $clientOrderModel->status = Model_ClientOrder::STATUS_PENDING_SETUP;
     $clientOrderModel->group_master = 1;
 
+    $dbMock = Mockery::mock(Box_Database::class);
+    $dbMock->shouldReceive('load')->atLeast()->once()->with('ClientOrder', Mockery::any())->andReturn($clientOrderModel);
+
     $eventMock = Mockery::mock(Box_EventManager::class);
     $eventMock->shouldReceive('fire')->atLeast()->once();
 
     $di = container();
+    $di['db'] = $dbMock;
     $di['events_manager'] = $eventMock;
     $di['logger'] = new Box_Log();
 
@@ -1679,6 +1707,63 @@ test('activateOrder activates pending order', function (): void {
     $serviceMock->setDi($di);
 
     $result = $serviceMock->activateOrder($clientOrderModel);
+
+    expect($result)->toBeTrue();
+});
+
+test('activateOrder is a no-op when order was already activated by a stale reference', function (): void {
+    $staleOrderModel = new Model_ClientOrder();
+    $staleOrderModel->loadBean(new Tests\Helpers\DummyBean());
+    $staleOrderModel->status = Model_ClientOrder::STATUS_PENDING_SETUP;
+
+    $activeOrderModel = new Model_ClientOrder();
+    $activeOrderModel->loadBean(new Tests\Helpers\DummyBean());
+    $activeOrderModel->status = Model_ClientOrder::STATUS_ACTIVE;
+    $activeOrderModel->group_master = 1;
+
+    $dbMock = Mockery::mock(Box_Database::class);
+    $dbMock->shouldReceive('load')->atLeast()->once()->with('ClientOrder', Mockery::any())->andReturn($activeOrderModel);
+
+    $di = container();
+    $di['db'] = $dbMock;
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldAllowMockingProtectedMethods();
+    $serviceMock->shouldReceive('createFromOrder')->never();
+    $serviceMock->shouldReceive('activateOrderAddons')->never();
+
+    $serviceMock->setDi($di);
+
+    $result = $serviceMock->activateOrder($staleOrderModel);
+
+    expect($result)->toBeTrue();
+});
+
+test('activateOrder force re-activates an already active order', function (): void {
+    $activeOrderModel = new Model_ClientOrder();
+    $activeOrderModel->loadBean(new Tests\Helpers\DummyBean());
+    $activeOrderModel->status = Model_ClientOrder::STATUS_ACTIVE;
+    $activeOrderModel->group_master = 1;
+
+    $dbMock = Mockery::mock(Box_Database::class);
+    $dbMock->shouldReceive('load')->atLeast()->once()->with('ClientOrder', Mockery::any())->andReturn($activeOrderModel);
+
+    $eventMock = Mockery::mock(Box_EventManager::class);
+    $eventMock->shouldReceive('fire')->atLeast()->once();
+
+    $di = container();
+    $di['db'] = $dbMock;
+    $di['events_manager'] = $eventMock;
+    $di['logger'] = new Box_Log();
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldAllowMockingProtectedMethods();
+    $serviceMock->shouldReceive('createFromOrder')->atLeast()->once()->andReturn([]);
+    $serviceMock->shouldReceive('activateOrderAddons')->atLeast()->once();
+
+    $serviceMock->setDi($di);
+
+    $result = $serviceMock->activateOrder($activeOrderModel, ['force' => true]);
 
     expect($result)->toBeTrue();
 });

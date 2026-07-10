@@ -3,7 +3,6 @@
 declare(strict_types=1);
 /**
  * Copyright 2022-2025 FOSSBilling
- * Copyright 2011-2021 BoxBilling, Inc.
  * SPDX-License-Identifier: Apache-2.0.
  *
  * @copyright FOSSBilling (https://www.fossbilling.org)
@@ -225,6 +224,8 @@ $di['mod_service'] = $di->protect(fn ($mod, $sub = '') => $di['mod']($mod)->getS
  */
 $di['mod_config'] = $di->protect(fn ($name) => $di['mod']($name)->getConfig());
 
+$di['cookie_queue'] = fn (): FOSSBilling\Http\CookieQueue => new FOSSBilling\Http\CookieQueue();
+
 /*
  *
  * @param void
@@ -289,6 +290,8 @@ $di['http_client'] = fn (): HttpClientInterface => HttpClient::create([
         'User-Agent' => 'FOSSBilling/' . Version::VERSION,
     ],
 ]);
+
+$di['filesystem'] = fn (): Filesystem => new Filesystem();
 
 $di['rate_limiter'] = function () use ($di) {
     $rateLimiter = new FOSSBilling\Security\RateLimiter();
@@ -622,7 +625,7 @@ $di['server_manager'] = $di->protect(function ($manager, $config) use ($di) {
 
     if (!class_exists($class)) {
         $file = Path::join(PATH_LIBRARY, 'Server', 'Manager', $managerName . '.php');
-        if ((new Filesystem())->exists($file)) {
+        if ($di['filesystem']->exists($file)) {
             require_once $file;
         }
     }
@@ -722,14 +725,14 @@ $di['password'] = fn (): FOSSBilling\PasswordManager => new FOSSBilling\Password
  *
  * @return \Box_Translate The new translation object that was just created.
  */
-$di['translate'] = $di->protect(function ($textDomain = '') {
+$di['translate'] = $di->protect(function ($textDomain = '') use ($di) {
     $tr = new Box_Translate();
 
     if (!empty($textDomain)) {
         $tr->setDomain($textDomain);
     }
 
-    $locale = FOSSBilling\i18n::getActiveLocale();
+    $locale = FOSSBilling\i18n::getActiveLocale($di['request'], true, $di['cookie_queue']);
 
     $tr->setLocale($locale);
     $tr->setup();

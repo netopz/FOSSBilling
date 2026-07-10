@@ -3,7 +3,6 @@
 declare(strict_types=1);
 /**
  * Copyright 2022-2025 FOSSBilling
- * Copyright 2011-2021 BoxBilling, Inc.
  * SPDX-License-Identifier: Apache-2.0.
  *
  * @copyright FOSSBilling (https://www.fossbilling.org)
@@ -32,7 +31,7 @@ class Guest extends \FOSSBilling\Api\AbstractApi
     public function get($data)
     {
         if (!preg_match('/^[a-f0-9]{30,60}$/', (string) $data['hash'])) {
-            throw new \FOSSBilling\Exception('Invalid invoice hash', null, 4001);
+            throw new \FOSSBilling\InformationException('Invalid invoice hash', null, 4001);
         }
 
         $this->getDi()['rate_limiter']->consumeOrThrow('invoice_get_ip', (string) $this->getIp());
@@ -40,7 +39,7 @@ class Guest extends \FOSSBilling\Api\AbstractApi
 
         $model = $this->getDi()['db']->findOne('Invoice', 'hash = :hash', ['hash' => $data['hash']]);
         if (!$model) {
-            throw new \FOSSBilling\Exception('Invoice was not found');
+            throw new \FOSSBilling\InformationException('Invoice was not found');
         }
         $service = $this->getService();
         $service->checkInvoiceAuth($model, InvoiceOperation::READ);
@@ -87,13 +86,45 @@ class Guest extends \FOSSBilling\Api\AbstractApi
         }
 
         if (empty($data['gateway_id'])) {
-            throw new \FOSSBilling\Exception('Payment method not found. Missing param gateway_id', null, 811);
+            throw new \FOSSBilling\InformationException('Payment method not found. Missing param gateway_id', null, 811);
         }
 
         $this->getDi()['rate_limiter']->consumeOrThrow('invoice_payment_ip', (string) $this->getIp());
         $this->getDi()['rate_limiter']->consumeOrThrow('invoice_payment_hash', (string) $data['hash']);
 
         return $this->getService()->processInvoice($data);
+    }
+
+    /**
+     * Create a Stripe PaymentIntent for direct frontend confirmation.
+     */
+    #[RequiredParams(['hash' => 'Invoice hash was not passed', 'gateway_id' => 'Payment gateway ID was not passed'])]
+    public function stripe_direct_intent($data): array
+    {
+        $invoice = $this->di['db']->findOne('Invoice', 'hash = :hash', ['hash' => $data['hash']]);
+        if (!$invoice instanceof \Model_Invoice) {
+            throw new \FOSSBilling\Exception('Invoice was not found');
+        }
+
+        $this->getService()->checkInvoiceAuth($invoice->client_id);
+
+        if ($invoice->status === \Model_Invoice::STATUS_PAID) {
+            throw new \FOSSBilling\InformationException('Invoice is already paid');
+        }
+
+        $gateway = $this->di['db']->getExistingModelById('PayGateway', $data['gateway_id'], 'Payment gateway not found');
+        if ($gateway->gateway !== 'Stripe') {
+            throw new \FOSSBilling\InformationException('Stripe payment gateway is required');
+        }
+
+        $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
+        $adapter = $payGatewayService->getPaymentAdapter($gateway, $invoice);
+
+        if (!method_exists($adapter, 'createDirectPaymentIntent')) {
+            throw new \FOSSBilling\Exception('Stripe Direct is not supported by this gateway');
+        }
+
+        return $adapter->createDirectPaymentIntent($invoice, $gateway);
     }
 
     /**

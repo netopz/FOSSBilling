@@ -59,6 +59,7 @@
                        </button>
                        <h1 class="d-none d-sm-flex navbar-brand d-none-navbar-horizontal pe-0 pe-md-3">
                            {{ include('partial_company_logo.html.twig', {
+                               company: company,
                                image_class: 'navbar-brand-image'
                            }) }}
                        </h1>
@@ -131,7 +132,7 @@
                             {{ avatar(profile.email, 32, 'avatar avatar-sm') }}
                             <div class="d-none d-xl-block ps-2">
                               <div>{{ profile.name }}</div>
-                              <div class="mt-1 small text-muted">{{ profile.role }}</div>
+                              <div class="mt-1 small text-muted">{{ profile.email }}</div>
                            </div>
                         </a>
                         <div class="dropdown-menu dropdown-menu-end dropdown-menu-arrow">

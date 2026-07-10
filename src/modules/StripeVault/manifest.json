@@ -1,0 +1,7 @@
+{
+    "id": "stripevault",
+    "type": "mod",
+    "name": "Stripe Vault",
+    "description": "Client-facing Stripe card vault: SetupIntent flow, saved payment method management, and off-session invoice charging.",
+    "version": "1.0.0"
+}

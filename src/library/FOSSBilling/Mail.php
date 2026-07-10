@@ -101,6 +101,18 @@ class Mail
     }
 
     /**
+     * Attach a file to the email message.
+     *
+     * @param string $content     the raw contents of the file to attach
+     * @param string $name        the file name shown to the recipient (e.g. 'invoice.pdf')
+     * @param string $contentType the MIME type of the attachment (e.g. 'application/pdf')
+     */
+    public function attach(string $content, string $name, string $contentType): void
+    {
+        $this->email->attach($content, $name, $contentType);
+    }
+
+    /**
      * Set the priority of the email message. Can be an integer between 1 and 5, with 1 being the highest priority.
      * It's recommended to use Symfony's pre-defined constants instead of a specific integer, but either should work. (Example: Email::PRIORITY_HIGH).
      *
@@ -143,6 +155,17 @@ class Mail
                     throw new InformationException('A SendGrid API key is required to send emails via SendGrid');
                 }
                 $dsn = 'sendgrid://' . $options['sendgrid_key'] . '@default';
+
+                break;
+            case 'mailgun':
+                if (empty($options['mailgun_key'])) {
+                    throw new InformationException('A Mailgun API key is required to send emails via Mailgun');
+                }
+                if (empty($options['mailgun_domain'])) {
+                    throw new InformationException('A Mailgun sending domain is required to send emails via Mailgun');
+                }
+                $region = $options['mailgun_region'] ?? 'us';
+                $dsn = 'mailgun+api://' . urlencode($options['mailgun_key']) . ':' . urlencode($options['mailgun_domain']) . '@default?region=' . urlencode($region);
 
                 break;
             case 'custom':

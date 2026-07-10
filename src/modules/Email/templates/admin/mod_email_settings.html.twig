@@ -482,6 +482,10 @@
                                         <label class="form-check-label" for="radioSendGrid">{{ 'SendGrid'|trans }}</label>
                                     </div>
                                     <div class="form-check">
+                                        <input class="form-check-input" id="radioMailgun" type="radio" name="mailer" value="mailgun"{% if params.mailer|default('') == 'mailgun' %} checked{% endif %}>
+                                        <label class="form-check-label" for="radioMailgun">{{ 'Mailgun'|trans }}</label>
+                                    </div>
+                                    <div class="form-check">
                                         <input class="form-check-input" id="radioCustom" type="radio" name="mailer" value="custom"{% if params.mailer|default('') == 'custom' %} checked{% endif %}>
                                         <label class="form-check-label" for="radioCustom">{{ 'Custom'|trans }}</label>
                                     </div>
@@ -514,6 +518,35 @@
                                 <div>
                                     <label class="form-label" for="sendgrid-key">{{ 'SendGrid API Key'|trans }}</label>
                                     <input class="form-control" id="sendgrid-key" type="text" name="sendgrid_key" value="{{ params.sendgrid_key|default('') }}">
+                                </div>
+                            </fieldset>
+
+                            <fieldset class="mailgun mt-4"{% if params.mailer|default('') != 'mailgun' %} style="display:none;"{% endif %}>
+                                <legend class="h5 mb-3">{{ 'Mailgun Settings'|trans }}</legend>
+                                <div class="row g-3">
+                                    <div class="col-lg-6">
+                                        <label class="form-label" for="mailgun-key">{{ 'Mailgun API Key'|trans }}</label>
+                                        <input class="form-control" id="mailgun-key" type="password" name="mailgun_key" value="{{ params.mailgun_key|default('') }}">
+                                        <small class="form-hint">{{ 'Your Mailgun private API key (starts with key-)'|trans }}</small>
+                                    </div>
+                                    <div class="col-lg-6">
+                                        <label class="form-label" for="mailgun-domain">{{ 'Mailgun Sending Domain'|trans }}</label>
+                                        <input class="form-control" id="mailgun-domain" type="text" name="mailgun_domain" value="{{ params.mailgun_domain|default('') }}" placeholder="mg.vioflare.com">
+                                        <small class="form-hint">{{ 'The domain you added and verified in Mailgun'|trans }}</small>
+                                    </div>
+                                    <div class="col-12">
+                                        <label class="form-label d-block">{{ 'Mailgun Region'|trans }}</label>
+                                        <div class="d-flex flex-wrap gap-3">
+                                            <div class="form-check">
+                                                <input class="form-check-input" id="radioMailgunUS" type="radio" name="mailgun_region" value="us"{% if params.mailgun_region|default('us') != 'eu' %} checked{% endif %}>
+                                                <label class="form-check-label" for="radioMailgunUS">{{ 'US (api.mailgun.net)'|trans }}</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" id="radioMailgunEU" type="radio" name="mailgun_region" value="eu"{% if params.mailgun_region|default('') == 'eu' %} checked{% endif %}>
+                                                <label class="form-check-label" for="radioMailgunEU">{{ 'EU (api.eu.mailgun.net)'|trans }}</label>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </fieldset>
 
@@ -627,28 +660,13 @@
             input.addEventListener('click', function() {
                 const smtpFieldset = document.querySelector('fieldset.smtp');
                 const sendgridFieldset = document.querySelector('fieldset.sendgrid');
+                const mailgunFieldset = document.querySelector('fieldset.mailgun');
                 const customFieldset = document.querySelector('fieldset.custom');
 
-                // Handle SMTP fieldset.
-                if (this.value === 'smtp') {
-                    smtpFieldset.style.display = 'block';
-                } else {
-                    smtpFieldset.style.display = 'none';
-                }
-
-                // Handle SendGrid fieldset.
-                if (this.value === 'sendgrid') {
-                    sendgridFieldset.style.display = 'block';
-                } else {
-                    sendgridFieldset.style.display = 'none';
-                }
-
-                // Handle Custom fieldset.
-                if (this.value === 'custom') {
-                    customFieldset.style.display = 'block';
-                } else {
-                    customFieldset.style.display = 'none';
-                }
+                smtpFieldset.style.display = this.value === 'smtp' ? 'block' : 'none';
+                sendgridFieldset.style.display = this.value === 'sendgrid' ? 'block' : 'none';
+                mailgunFieldset.style.display = this.value === 'mailgun' ? 'block' : 'none';
+                customFieldset.style.display = this.value === 'custom' ? 'block' : 'none';
             });
         });
 

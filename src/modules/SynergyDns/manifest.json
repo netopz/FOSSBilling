@@ -1,0 +1,7 @@
+{
+    "id": "synergydns",
+    "type": "mod",
+    "name": "Synergy DNS",
+    "description": "DNS record management, DNSSEC, child hosts, and mail forwards via the Synergy Wholesale SOAP API.",
+    "version": "1.0.0"
+}
