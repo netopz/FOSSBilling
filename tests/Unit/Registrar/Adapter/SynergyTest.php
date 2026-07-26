@@ -125,7 +125,7 @@ describe('Registrar_Adapter_Synergy', function (): void {
             ->and($captured['billing_country'])->toBe('AU');
     });
 
-    test('error statuses raise Registrar_Exception', function (): void {
+    test('error statuses raise Registrar_Exception on mutating calls', function (): void {
         $client = Mockery::mock(SoapClient::class);
         $client->shouldReceive('__soapCall')
             ->once()
@@ -136,7 +136,21 @@ describe('Registrar_Adapter_Synergy', function (): void {
 
         $adapter = buildSynergyAdapter($client);
 
-        expect(fn () => $adapter->isDomainAvailable(buildSynergyDomain()))
+        expect(fn () => $adapter->renewDomain(buildSynergyDomain()))
             ->toThrow(Registrar_Exception::class);
+    });
+
+    test('isDomainAvailable returns false for UNAVAILABLE without throwing', function (): void {
+        $client = Mockery::mock(SoapClient::class);
+        $client->shouldReceive('__soapCall')
+            ->once()
+            ->andReturn((object) [
+                'status' => 'UNAVAILABLE',
+                'errorMessage' => 'Domain is not available for registration.',
+            ]);
+
+        $adapter = buildSynergyAdapter($client);
+
+        expect($adapter->isDomainAvailable(buildSynergyDomain()))->toBeFalse();
     });
 });

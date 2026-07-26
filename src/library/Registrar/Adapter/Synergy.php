@@ -105,7 +105,7 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         $result = $this->call('checkDomain', [
             'domainName' => $domain->getName(),
             'command' => 'create',
-        ]);
+        ], strict: false);
 
         return str_starts_with(strtoupper((string) ($result->status ?? '')), 'AVAILABLE');
     }
@@ -115,7 +115,7 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         $result = $this->call('checkDomain', [
             'domainName' => $domain->getName(),
             'command' => 'transfer',
-        ]);
+        ], strict: false);
 
         $status = strtoupper((string) ($result->status ?? ''));
 
@@ -309,7 +309,7 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         $this->client = $client;
     }
 
-    private function call(string $method, array $params = []): object
+    private function call(string $method, array $params = [], bool $strict = true): object
     {
         $request = [
             'resellerID' => $this->config['reseller_id'],
@@ -327,7 +327,7 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         }
 
         $status = strtoupper((string) ($result->status ?? 'OK'));
-        if (!preg_match('/^(OK|AVAILABLE)/', $status)) {
+        if ($strict && !preg_match('/^(OK|AVAILABLE)/', $status)) {
             $message = (string) ($result->errorMessage ?? $result->statusDescription ?? $status);
             $this->getLog()->error(sprintf('Synergy Wholesale API error on %s: %s', $method, $message));
             throw new Registrar_Exception(':type registrar error: :error', [':type' => 'Synergy Wholesale', ':error' => $message]);
