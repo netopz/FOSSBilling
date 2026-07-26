@@ -81,7 +81,7 @@ describe('Registrar_Adapter_Synergy', function (): void {
         $client->shouldReceive('__soapCall')
             ->once()
             ->with('domainRegister', Mockery::on(function (array $args) use (&$captured): bool {
-                $captured = $args[0]['request'] ?? null;
+                $captured = $args[0] ?? null;
 
                 return is_array($captured);
             }))
@@ -108,7 +108,7 @@ describe('Registrar_Adapter_Synergy', function (): void {
         $client->shouldReceive('__soapCall')
             ->once()
             ->with('updateContact', Mockery::on(function (array $args) use (&$captured): bool {
-                $captured = $args[0]['request'] ?? null;
+                $captured = $args[0] ?? null;
 
                 return is_array($captured);
             }))
