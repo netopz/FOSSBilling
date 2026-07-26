@@ -104,7 +104,7 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
     {
         $result = $this->call('checkDomain', [
             'domainName' => $domain->getName(),
-            'command' => 'register',
+            'command' => 'create',
         ]);
 
         return str_starts_with(strtoupper((string) ($result->status ?? '')), 'AVAILABLE');
