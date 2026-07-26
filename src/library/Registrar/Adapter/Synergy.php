@@ -318,7 +318,9 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         ];
 
         try {
-            $result = $this->client()->__soapCall($method, [['request' => $request]]);
+            // WSDL methods take a single complex-type argument (e.g. balanceQueryRequest).
+            // Pass the fields directly — wrapping as ['request' => ...] fails PHP SoapClient encoding.
+            $result = $this->client()->__soapCall($method, [$request]);
         } catch (Throwable $e) {
             $this->getLog()->error(sprintf('Synergy Wholesale API transport error on %s: %s', $method, $e->getMessage()));
             throw new Registrar_Exception('Failed to call :action with the :type registrar, check the error logs for further details', [':action' => $method, ':type' => 'Synergy Wholesale']);
