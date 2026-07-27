@@ -1,0 +1,94 @@
+name: Deploy FOSSBilling
+
+on:
+  workflow_dispatch:  # manual only — safe while FOSSBilling is not production yet
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+
+      # Repo composer.json maps classes under src/library with vendor-dir=src/vendor.
+      # We deploy the flattened src/ tree as the document root, so regenerate
+      # autoload paths for library/ + modules/ before rsync.
+      - name: Regenerate autoload for flat webroot
+        run: |
+          TMP="$(mktemp)"
+          cat >"$TMP" <<'EOF'
+          {
+              "name": "fossbilling/webroot-autoload",
+              "autoload": {
+                  "psr-0": {
+                      "Payment_": "library/",
+                      "Registrar_": "library/",
+                      "Server_": "library/"
+                  },
+                  "psr-4": {
+                      "Box\\Mod\\": "modules/"
+                  },
+                  "classmap": ["library/"]
+              },
+              "config": {
+                  "vendor-dir": "vendor"
+              }
+          }
+          EOF
+          # strip leading spaces introduced by YAML indentation
+          sed -i 's/^          //' "$TMP"
+          (cd src && COMPOSER="$TMP" composer dump-autoload -o --no-dev --no-interaction)
+          rm -f "$TMP"
+          if grep -q "src/library" src/vendor/composer/autoload_classmap.php; then
+            echo "ERROR: webroot autoload still references src/library" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Build frontend assets
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build-core
+          npm run build-admin_default
+          npm run build-huraga
+          grep -q 'fossbilling_csrf' src/public/assets/js/api.js
+
+      - name: Deploy src/ to server via rsync
+        uses: easingthemes/ssh-deploy@main
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          ARGS: "-rlgoDzvc -i --delete"
+          SOURCE: "src/"
+          REMOTE_HOST: ${{ secrets.SERVER_IP }}
+          REMOTE_USER: ${{ secrets.SERVER_USER }}
+          TARGET: "/var/www/billing.vioflare.com/"
+          EXCLUDE: "config.php, config.old.php, data/log/, data/cache/, data/uploads/"
+          SCRIPT_BEFORE: |
+            set -euo pipefail
+            TARGET="/var/www/billing.vioflare.com"
+            sudo mkdir -p "${TARGET}"
+            sudo chown -R "$(whoami):www-data" "${TARGET}"
+            sudo chmod u+rwx "${TARGET}"
+          SCRIPT_AFTER: |
+            set -euo pipefail
+            TARGET="/var/www/billing.vioflare.com"
+            mkdir -p "${TARGET}/data/log" "${TARGET}/data/cache" "${TARGET}/data/uploads"
+            sudo chown -R www-data:www-data "${TARGET}"
+            sudo find "${TARGET}/data/log" "${TARGET}/data/cache" "${TARGET}/data/uploads" -type d -exec chmod 775 {} \;
+            echo "Deploy complete: ${TARGET}"
+            ls -la "${TARGET}" | head -30
