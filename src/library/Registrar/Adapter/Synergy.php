@@ -102,9 +102,10 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
 
     public function isDomainAvailable(Registrar_Domain $domain): bool
     {
+        // Synergy Wholesale expects command=register|renew|transfer (not "create").
         $result = $this->call('checkDomain', [
             'domainName' => $domain->getName(),
-            'command' => 'create',
+            'command' => 'register',
         ], strict: false);
 
         return str_starts_with(strtoupper((string) ($result->status ?? '')), 'AVAILABLE');
