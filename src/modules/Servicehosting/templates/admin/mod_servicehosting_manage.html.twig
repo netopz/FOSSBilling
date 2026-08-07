@@ -1,5 +1,12 @@
 {% import 'macro_functions.html.twig' as mf %}
 
+{% if service is empty or service.server is empty %}
+<div class="card-body">
+    <div class="alert alert-warning mb-0" role="alert">
+        {{ 'Hosting service details are incomplete (missing server link). Activate the order, or fix the product server assignment, then reopen this page.'|trans }}
+    </div>
+</div>
+{% else %}
 {% set server = service.server %}
 {% set hp = service.hosting_plan %}
 
@@ -25,7 +32,7 @@
         </tr>
         <tr>
             <td class="text-end">{{ 'Hosting Plan'|trans }}:</td>
-            <td><a href='{{ "servicehosting/plan/#{hp.id}"|url }}'>{{ hp.name }}</a></td>
+            <td>{% if hp %}<a href='{{ "servicehosting/plan/#{hp.id}"|url }}'>{{ hp.name }}</a>{% else %}—{% endif %}</td>
         </tr>
         <tr>
             <td class="text-end">{{ 'Server IP'|trans }}:</td>
@@ -61,11 +68,11 @@
         {% endif %}
         <tr>
             <td class="text-end">{{ 'Bandwidth'|trans }}:</td>
-            <td>{{ hp.bandwidth }} MB / {{ 'per month'|trans }}</td>
+            <td>{% if hp %}{{ hp.bandwidth }} MB / {{ 'per month'|trans }}{% else %}—{% endif %}</td>
         </tr>
         <tr>
             <td class="text-end">{{ 'Disk Quota'|trans }}:</td>
-            <td>{{ hp.quota }} MB</td>
+            <td>{% if hp %}{{ hp.quota }} MB{% else %}—{% endif %}</td>
         </tr>
     </tbody>
 </table>
@@ -106,7 +113,7 @@
             <div class="row g-3">
                 <div class="col-lg-6">
                     <label class="form-label">{{ 'New Hosting Plan'|trans }}</label>
-                    {{ mf.selectbox('plan_id', admin.servicehosting_hp_get_pairs, hp.id, 1) }}
+                    {{ mf.selectbox('plan_id', admin.servicehosting_hp_get_pairs, hp.id|default(null), 1) }}
                 </div>
             </div>
 
@@ -216,3 +223,4 @@
         </form>
     </div>
 </div>
+{% endif %}

@@ -1739,6 +1739,98 @@ class Service implements InjectionAwareInterface
         ];
     }
 
+    /**
+     * Create a Stripe PaymentIntent for an invoice for the headless (SPA)
+     * pay flow and return the client_secret + publishable key. The Stripe
+     * webhook (ipn.php) marks the invoice paid, so no Transaction is created
+     * here — the invoice_id metadata on the PaymentIntent is what links the
+     * webhook back to this invoice.
+     *
+     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int}
+     */
+    public function createStripePaymentIntent(\Model_Invoice $invoice, ?int $gatewayId = null): array
+    {
+        if ($invoice->status === \Model_Invoice::STATUS_PAID) {
+            throw new InformationException('Invoice is already paid', null, 816);
+        }
+
+        $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
+
+        // Resolve the Stripe gateway: an explicit id when provided, otherwise
+        // the first enabled gateway backed by the Stripe adapter.
+        if ($gatewayId) {
+            $gtw = $this->di['db']->getExistingModelById('PayGateway', $gatewayId, 'Payment gateway not found');
+            if ($gtw->gateway !== 'Stripe') {
+                throw new InformationException('Selected payment gateway is not Stripe', null, 817);
+            }
+        } else {
+            $gtw = $this->di['db']->findOne('PayGateway', "gateway = 'Stripe' AND enabled = 1");
+            if (!$gtw instanceof \Model_PayGateway) {
+                throw new InformationException('No enabled Stripe payment gateway is configured', null, 818);
+            }
+        }
+
+        $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
+        if (!method_exists($adapter, 'createInvoicePaymentIntent')) {
+            throw new InformationException('The configured Stripe gateway does not support direct PaymentIntents', null, 819);
+        }
+
+        return $adapter->createInvoicePaymentIntent($invoice);
+    }
+
+    /**
+     * Reconcile a Stripe PaymentIntent that already succeeded into FOSSBilling
+     * (mark invoice paid + record transaction). Used when the SPA confirms
+     * payment client-side and the webhook has not arrived yet — or never will.
+     *
+     * @return array{success: bool, status: string, payment_intent_id: string}
+     */
+    public function reconcileStripePaymentIntent(\Model_Invoice $invoice, string $paymentIntentId, ?int $gatewayId = null): array
+    {
+        $paymentIntentId = trim($paymentIntentId);
+        if ($paymentIntentId === '' || !str_starts_with($paymentIntentId, 'pi_')) {
+            throw new InformationException('A valid Stripe PaymentIntent id is required', null, 820);
+        }
+
+        if ($invoice->status === \Model_Invoice::STATUS_PAID) {
+            return [
+                'success' => true,
+                'status' => \Model_Invoice::STATUS_PAID,
+                'payment_intent_id' => $paymentIntentId,
+            ];
+        }
+
+        $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
+
+        if ($gatewayId) {
+            $gtw = $this->di['db']->getExistingModelById('PayGateway', $gatewayId, 'Payment gateway not found');
+            if ($gtw->gateway !== 'Stripe') {
+                throw new InformationException('Selected payment gateway is not Stripe', null, 817);
+            }
+        } else {
+            $gtw = $this->di['db']->findOne('PayGateway', "gateway = 'Stripe' AND enabled = 1");
+            if (!$gtw instanceof \Model_PayGateway) {
+                throw new InformationException('No enabled Stripe payment gateway is configured', null, 818);
+            }
+        }
+
+        $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
+        if (!method_exists($adapter, 'reconcilePaymentIntentById')) {
+            throw new InformationException('The configured Stripe gateway does not support PaymentIntent reconciliation', null, 821);
+        }
+
+        $adapter->reconcilePaymentIntentById($paymentIntentId);
+
+        $fresh = $this->di['db']->getExistingModelById('Invoice', $invoice->id);
+        $status = $fresh->status ?? $invoice->status;
+
+        return [
+            'success' => $status === \Model_Invoice::STATUS_PAID,
+            'status' => (string) $status,
+            'payment_intent_id' => $paymentIntentId,
+        ];
+    }
+
     public function generatePDF($hash, $identity): Response
     {
         $invoiceModel = $this->di['db']->findOne('Invoice', 'hash = :hash', [':hash' => $hash]);

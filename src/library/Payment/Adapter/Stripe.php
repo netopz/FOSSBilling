@@ -184,19 +184,9 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
     public function getInvoiceTitle(Model_Invoice $invoice): string
     {
-        $invoiceItems = $this->di['db']->getAll('SELECT title FROM invoice_item WHERE invoice_id = :invoice_id', [':invoice_id' => $invoice->id]);
+        $invoiceNumber = $invoice->serie . sprintf('%05s', $invoice->nr);
 
-        $params = [
-            ':id' => sprintf('%05s', $invoice->nr),
-            ':serie' => $invoice->serie,
-            ':title' => $invoiceItems[0]['title'] ?? '',
-        ];
-        $title = __trans('Payment for invoice :serie:id [:title]', $params);
-        if (FOSSBilling\Tools::safeCount($invoiceItems) > 1) {
-            $title = __trans('Payment for invoice :serie:id', $params);
-        }
-
-        return $title;
+        return 'Vioflare Networks - Invoice ' . $invoiceNumber;
     }
 
     public function logError($e, Model_Transaction $tx): void
@@ -1408,7 +1398,16 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         throw new Payment_Exception('Unable to determine client for transaction. No invoice or client metadata available.');
     }
 
-    protected function _generateForm(Model_Invoice $invoice): string
+    /**
+     * Build the one-time PaymentIntent parameters + idempotency key for an
+     * invoice. Shared by the hosted payment form (_generateForm) and the
+     * headless intent API (createInvoicePaymentIntent) so both stay in sync —
+     * critically, both stamp the invoice_id/client_id/gateway_id metadata the
+     * webhook (ipn.php) relies on to mark the invoice paid.
+     *
+     * @return array{0: array, 1: string}
+     */
+    private function _oneTimeIntentParams(Model_Invoice $invoice): array
     {
         $intentParams = [
             'amount' => $this->getAmountInMinorUnits($invoice),
@@ -1428,6 +1427,138 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             $this->config['gateway_id'],
             hash('sha256', json_encode($intentParams, JSON_THROW_ON_ERROR))
         );
+
+        return [$intentParams, $idempotencyKey];
+    }
+
+    /**
+     * Create (idempotently) a one-time PaymentIntent for an invoice and return
+     * the data a headless client needs to confirm the payment with Stripe.js
+     * (Payment Element and Express Checkout / Apple Pay / Google Pay).
+     *
+     * This is the "Stripe Direct" path used by the Vioflare SPA via the
+     * FastAPI middleware. No Transaction is pre-created: reconciliation happens
+     * through the Stripe webhook (ipn.php -> handlePaymentIntentSucceededWebhook)
+     * exactly like the hosted form, keyed off the invoice_id metadata. The
+     * returned publishable key follows the gateway's test_mode flag, so the
+     * gateway's test vs live key pair is the single source of truth.
+     *
+     * If an idempotent create returns an already-succeeded PaymentIntent
+     * (client paid, webhook never marked the invoice), reconcile immediately
+     * and return already_paid so the SPA does not call confirmPayment again.
+     *
+     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int, already_paid?: bool, payment_intent_id?: string}
+     */
+    public function createInvoicePaymentIntent(Model_Invoice $invoice): array
+    {
+        [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice);
+        $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
+
+        $testMode = (bool) ($this->config['test_mode'] ?? false);
+        $pubKey = $testMode ? ($this->config['test_pub_key'] ?? '') : ($this->config['pub_key'] ?? '');
+        $gatewayId = (int) $this->config['gateway_id'];
+
+        if (($intent->status ?? '') === 'succeeded') {
+            $this->reconcileSucceededPaymentIntent($intent, $gatewayId);
+
+            return [
+                'client_secret' => '',
+                'publishable_key' => (string) $pubKey,
+                'test_mode' => $testMode,
+                'gateway_id' => $gatewayId,
+                'already_paid' => true,
+                'payment_intent_id' => (string) $intent->id,
+            ];
+        }
+
+        return [
+            'client_secret' => (string) $intent->client_secret,
+            'publishable_key' => (string) $pubKey,
+            'test_mode' => $testMode,
+            'gateway_id' => $gatewayId,
+        ];
+    }
+
+    /**
+     * Retrieve a PaymentIntent from Stripe and, when it has succeeded with
+     * FOSSBilling metadata, mark the linked invoice paid. Used by the SPA
+     * confirm endpoint when the webhook is slow or missing.
+     */
+    public function reconcilePaymentIntentById(string $paymentIntentId): bool
+    {
+        $intent = $this->stripe->paymentIntents->retrieve($paymentIntentId);
+
+        return $this->reconcileSucceededPaymentIntent($intent, (int) $this->config['gateway_id']);
+    }
+
+    /**
+     * Apply a succeeded one-time PaymentIntent to FOSSBilling without waiting
+     * for Stripe → ipn.php. Safe to call repeatedly (lock + txn_id dedup).
+     */
+    public function reconcileSucceededPaymentIntent(object $paymentIntent, int $gateway_id): bool
+    {
+        return $this->withPaymentIntentLock(
+            (string) $paymentIntent->id,
+            $gateway_id,
+            fn (): bool => $this->reconcileSucceededPaymentIntentUnderLock($paymentIntent, $gateway_id)
+        );
+    }
+
+    private function reconcileSucceededPaymentIntentUnderLock(object $paymentIntent, int $gateway_id): bool
+    {
+        if (($paymentIntent->status ?? '') !== 'succeeded') {
+            return false;
+        }
+
+        $existing = $this->di['db']->findOne(
+            'Transaction',
+            'txn_id = :txn_id AND gateway_id = :gateway_id AND status IN (:s1, :s2)',
+            [
+                ':txn_id' => $paymentIntent->id,
+                ':gateway_id' => $gateway_id,
+                ':s1' => Model_Transaction::STATUS_PROCESSING,
+                ':s2' => Model_Transaction::STATUS_PROCESSED,
+            ]
+        );
+        if ($existing instanceof Model_Transaction) {
+            return true;
+        }
+
+        $invoiceId = $paymentIntent->metadata->invoice_id ?? null;
+        $clientId = $paymentIntent->metadata->client_id ?? null;
+        if (!$invoiceId && !$clientId) {
+            return false;
+        }
+
+        $invoice = $invoiceId
+            ? $this->di['db']->findOne('Invoice', 'id = :id', [':id' => (int) $invoiceId])
+            : null;
+
+        if ($invoice instanceof Model_Invoice && $invoice->status === Model_Invoice::STATUS_PAID) {
+            return true;
+        }
+
+        $tx = $this->di['db']->dispense('Transaction');
+        $tx->invoice_id = $invoiceId ? (int) $invoiceId : null;
+        $tx->gateway_id = $gateway_id;
+        $tx->txn_id = $paymentIntent->id;
+        $tx->txn_status = $paymentIntent->status;
+        $tx->amount = $this->getAmountFromMinorUnits($paymentIntent->amount, $paymentIntent->currency);
+        $tx->currency = $paymentIntent->currency;
+        $tx->type = Payment_Transaction::TXTYPE_PAYMENT;
+        $tx->status = Model_Transaction::STATUS_RECEIVED;
+        $tx->created_at = date('Y-m-d H:i:s');
+        $tx->updated_at = date('Y-m-d H:i:s');
+        $this->di['db']->store($tx);
+
+        $this->applyOneTimePayment($tx, $invoice instanceof Model_Invoice ? $invoice : null, $paymentIntent);
+
+        return true;
+    }
+
+    protected function _generateForm(Model_Invoice $invoice): string
+    {
+        [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice);
         $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
 
         $pubKey = ($this->config['test_mode']) ? $this->config['test_pub_key'] : $this->config['pub_key'];

@@ -86,6 +86,57 @@ class Admin extends \FOSSBilling\Api\AbstractApi
     }
 
     /**
+     * Create a Stripe PaymentIntent for an invoice and return the data a
+     * headless client (the Vioflare SPA, via the FastAPI middleware) needs to
+     * confirm payment with Stripe.js — Payment Element and Express Checkout
+     * (Apple Pay / Google Pay).
+     *
+     * The payment is reconciled through the Stripe webhook (ipn.php), so the
+     * invoice is marked paid server-side regardless of whether the browser
+     * returns. The publishable key follows the gateway's test_mode flag, so the
+     * gateway's stored test vs live key pair is the single source of truth.
+     *
+     * @optional int $gateway_id - Stripe pay gateway id. Auto-detected when omitted.
+     *
+     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int}
+     */
+    #[RequiredParams(['id' => 'Invoice ID is missing'])]
+    public function stripe_payment_intent($data)
+    {
+        $this->checkPermissions('invoice', 'manage_invoices');
+
+        $invoice = $this->_getInvoice($data);
+
+        return $this->getService()->createStripePaymentIntent($invoice, $data['gateway_id'] ?? null);
+    }
+
+    /**
+     * Reconcile a succeeded Stripe PaymentIntent onto an invoice without
+     * waiting for ipn.php. Called by the Vioflare SPA after confirmPayment()
+     * so a missing/misconfigured Stripe webhook cannot leave the invoice unpaid.
+     *
+     * @optional int $gateway_id - Stripe pay gateway id. Auto-detected when omitted.
+     *
+     * @return array{success: bool, status: string, payment_intent_id: string}
+     */
+    #[RequiredParams([
+        'id' => 'Invoice ID is missing',
+        'payment_intent_id' => 'Stripe PaymentIntent ID is missing',
+    ])]
+    public function stripe_reconcile($data)
+    {
+        $this->checkPermissions('invoice', 'manage_invoices');
+
+        $invoice = $this->_getInvoice($data);
+
+        return $this->getService()->reconcileStripePaymentIntent(
+            $invoice,
+            (string) $data['payment_intent_id'],
+            $data['gateway_id'] ?? null
+        );
+    }
+
+    /**
      * Prepare invoice for editing and updating.
      * Uses clients details, such as currency assigned to client.
      * If client currency is not defined, sets default currency for client.
