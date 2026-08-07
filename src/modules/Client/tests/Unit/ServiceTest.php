@@ -759,6 +759,25 @@ test('toApiArray includes custom fields beyond the original cap of 10', function
     expect($result['custom_1'])->toBeNull();
 });
 
+test('toApiArray reads the client group through the repository for legacy client models', function (): void {
+    $service = new Box\Mod\Client\Service();
+    $legacyClient = new Model_Client();
+    $legacyClient->loadBean(new Tests\Helpers\DummyBean());
+    $legacyClient->client_group_id = 1;
+
+    $clientGroup = createEntity(Box\Mod\Client\Entity\ClientGroup::class, ['id' => 1, 'title' => 'Group Title']);
+
+    $di = container();
+    $di['em']->getRepository(Box\Mod\Client\Entity\Client::class)->shouldReceive('find')->byDefault()->andReturnNull();
+    $di['em']->getRepository(Box\Mod\Client\Entity\ClientGroup::class)->shouldReceive('find')->byDefault()->andReturn($clientGroup);
+
+    $service->setDi($di);
+
+    $result = $service->toApiArray($legacyClient, true, createEntity(Box\Mod\Staff\Entity\Admin::class));
+    expect($result['group'])->toBe('Group Title');
+    expect($result['group_id'])->toBe(1);
+});
+
 dataset('isClientTaxableProvider', [
     [
         false,
@@ -1156,4 +1175,122 @@ test('i18n::validateTimezone returns the value when it is a known IANA identifie
 
 test('i18n::validateTimezone throws InformationException for an unknown identifier', function (): void {
     expect(fn (): ?string => FOSSBilling\i18n::validateTimezone('Mars/Olympus_Mons'))->toThrow(FOSSBilling\InformationException::class);
+});
+
+test('exportCSV uses default columns when no headers are provided', function (): void {
+    $service = new Box\Mod\Client\Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    $service->exportCSV([]);
+
+    expect($capturedHeaders)->toBe(['id', 'email', 'status', 'first_name', 'last_name', 'phone_cc', 'phone', 'company', 'company_vat', 'company_number', 'address_1', 'address_2', 'city', 'state', 'postcode', 'country', 'currency']);
+});
+
+test('exportCSV strips pass, salt, and api_token from numeric-array headers', function (): void {
+    $service = new Box\Mod\Client\Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    // Simulates: headers[]=pass&headers[]=salt&headers[]=api_token&headers[]=email
+    $service->exportCSV(['pass', 'salt', 'api_token', 'email']);
+
+    expect($capturedHeaders)->not->toContain('pass')
+        ->and($capturedHeaders)->not->toContain('salt')
+        ->and($capturedHeaders)->not->toContain('api_token')
+        ->and($capturedHeaders)->toContain('email');
+});
+
+test('exportCSV preserves allowlisted columns beyond the default set', function (): void {
+    $service = new Box\Mod\Client\Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    $service->exportCSV(['email', 'created_at', 'custom_1']);
+
+    expect($capturedHeaders)->toHaveCount(3)
+        ->and($capturedHeaders)->toContain('email')
+        ->and($capturedHeaders)->toContain('created_at')
+        ->and($capturedHeaders)->toContain('custom_1');
+});
+
+test('exportCSV falls back to defaults when only sensitive columns are requested', function (): void {
+    $service = new Box\Mod\Client\Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    $service->exportCSV(['pass', 'salt', 'api_token']);
+
+    expect($capturedHeaders)->toBe(['id', 'email', 'status', 'first_name', 'last_name', 'phone_cc', 'phone', 'company', 'company_vat', 'company_number', 'address_1', 'address_2', 'city', 'state', 'postcode', 'country', 'currency']);
+});
+
+test('exportCSV silently drops unknown column names', function (): void {
+    $service = new Box\Mod\Client\Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    $service->exportCSV(['email', 'totally_fake_column', 'id']);
+
+    expect($capturedHeaders)->toBe(['id', 'email'])
+        ->and($capturedHeaders)->not->toContain('totally_fake_column');
 });

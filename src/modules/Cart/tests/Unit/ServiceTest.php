@@ -344,6 +344,42 @@ test('removeProduct throws exception when cart product not found', function (): 
     expect(fn (): bool => $service->removeProduct($cart, 1))->toThrow(FOSSBilling\Exception::class);
 });
 
+test('removeProduct removes matching addons', function (): void {
+    $cartId = 10;
+    $cart = new Cart();
+    $cartReflection = new ReflectionProperty($cart, 'id');
+    $cartReflection->setValue($cart, $cartId);
+
+    $mainProductId = 7;
+    $main = new CartProduct();
+    $main->setProductId($mainProductId);
+    $main->setConfig(json_encode(['domain_name' => 'example.com']));
+
+    $addon = new CartProduct();
+    $addon->setConfig(json_encode(['parent_id' => $mainProductId, 'domain_name' => 'example.com']));
+
+    $unrelated = new CartProduct();
+    $unrelated->setConfig(json_encode(['parent_id' => 999, 'domain_name' => 'other.com']));
+
+    $cartProductRepo = Mockery::mock(CartProductRepository::class);
+    $cartProductRepo->shouldReceive('findOneByCartAndId')->once()->with($cartId, 1)->andReturn($main);
+    $cartProductRepo->shouldReceive('findByCartId')->once()->with($cartId)->andReturn([$addon, $unrelated]);
+
+    $emMock = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class);
+    $emMock->shouldReceive('getRepository')->with(CartProduct::class)->andReturn($cartProductRepo);
+    $emMock->shouldReceive('remove')->once()->with($addon);
+    $emMock->shouldReceive('remove')->once()->with($main);
+    $emMock->shouldReceive('flush')->once();
+
+    $di = container();
+    $di['em'] = $emMock;
+    $di['logger'] = new Tests\Helpers\TestLogger();
+    $service = new Service();
+    $service->setDi($di);
+
+    expect($service->removeProduct($cart, 1))->toBeTrue();
+});
+
 test('changeCartCurrency returns true', function (): void {
     $emMock = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class);
     $emMock->shouldReceive('persist')->atLeast()->once();
@@ -476,7 +512,7 @@ test('applyPromo throws exception when cart is empty', function (): void {
     $service = new Service();
     $service->setDi($di);
 
-    expect(fn () => $service->applyPromo($cart, $promo))->toThrow(FOSSBilling\Exception::class);
+    expect(fn (): bool => $service->applyPromo($cart, $promo))->toThrow(FOSSBilling\Exception::class);
 });
 
 test('rm returns true', function (): void {
@@ -980,6 +1016,109 @@ test('createFromCart compensates promo usage on transaction failure', function (
         ->toThrow(RuntimeException::class, 'Doctrine flush failed');
 });
 
+test('createFromCart does not roll back order creation when synchronous activation fails', function (): void {
+    // A $0-total order is activated synchronously, inside the same
+    // transaction that creates it. The recovery path used to record the
+    // failure with the literal status 'error', which isn't a valid Order
+    // status - InformationException would escape and roll back the whole
+    // checkout, not just fail this one order.
+    $cart = createEntity(Cart::class);
+    $cart->id = 3;
+    $cart->currency_id = 2;
+
+    $client = createEntity(Client::class);
+    $client->id = 9;
+    $client->currency = 'USD';
+
+    $currency = Mockery::mock(Currency::class)->makePartial();
+    $currency->shouldReceive('getCode')->once()->andReturn('USD');
+    $currency->shouldReceive('getConversionRate')->atLeast()->once()->andReturn(1.0);
+
+    $currencyRepository = Mockery::mock(CurrencyRepository::class);
+    $currencyRepository->shouldReceive('find')->once()->with(2)->andReturn($currency);
+
+    $currencyService = Mockery::mock(CurrencyService::class);
+    $currencyService->shouldReceive('getCurrencyRepository')->once()->andReturn($currencyRepository);
+
+    $clientService = Mockery::mock(Box\Mod\Client\Service::class);
+    $clientService->shouldReceive('isClientTaxable')->once()->with($client)->andReturn(false);
+
+    $product = new Product();
+    $productIdReflection = new ReflectionProperty($product, 'id');
+    $productIdReflection->setValue($product, 5);
+    $product->setStatus('enabled');
+    $product->setType('service');
+    $product->setSetup(ProductService::SETUP_AFTER_PAYMENT);
+
+    $cartProduct = createEntity(CartProduct::class);
+    $cartProduct->id = 13;
+
+    $orderService = Mockery::mock(Box\Mod\Order\Service::class)->makePartial();
+    $orderService->shouldReceive('saveStatusChange')->once()->with(Mockery::type(Order::class), 'Order Created');
+    $orderService->shouldReceive('toApiArray')->once()->with(Mockery::type(Order::class), false, $client)->andReturn([
+        'product_id' => 5,
+        'total' => 0,
+        'discount' => 0,
+    ]);
+    // An \Error (not an \Exception) to prove the catch was widened to
+    // \Throwable - a narrower catch (\Exception) would miss this and let it
+    // escape wrapInTransaction(), rolling back the whole checkout.
+    $orderService->shouldReceive('activateOrder')->once()->andThrow(new Error('Simulated provisioning failure'));
+
+    $dbMock = Mockery::mock(Box_Database::class)->shouldIgnoreMissing();
+    $dbMock->shouldReceive('getExistingModelById')->atLeast()->once()->andReturn(cartServiceCreateLegacyClient());
+
+    $emMock = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class);
+    $emMock->shouldReceive('wrapInTransaction')->once()->with(Mockery::type(Closure::class))->andReturnUsing(fn (Closure $callback) => $callback());
+    $emMock->shouldReceive('persist')->atLeast()->once();
+    $emMock->shouldReceive('flush')->atLeast()->once();
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getSessionCart')->once()->andReturn($cart);
+    $serviceMock->shouldReceive('toApiArray')->once()->with($cart)->andReturn([
+        'items' => [['id' => 1]],
+        'total' => 0,
+    ]);
+    $serviceMock->shouldReceive('getCartProducts')->once()->with($cart)->andReturn([$cartProduct]);
+    $serviceMock->shouldReceive('cartProductToApiArray')->once()->with($cartProduct)->andReturn([
+        'product_id' => 5,
+        'form_id' => null,
+        'title' => 'Example product',
+        'type' => 'service',
+        'unit' => 'service',
+        'period' => '1M',
+        'quantity' => 1,
+        'price' => 0,
+        'discount_price' => 0,
+        'setup_price' => 0,
+        'discount_setup' => 0,
+        'notes' => null,
+    ]);
+    $serviceMock->shouldReceive('isStockAvailable')->once()->with($product, 1)->andReturn(true);
+
+    $productService = Mockery::mock(ProductService::class);
+    $productService->shouldReceive('findProductById')->twice()->with(5)->andReturn($product);
+
+    $di = container();
+    $di['db'] = $dbMock;
+    $di['em'] = $emMock;
+    $di['logger'] = new Box_Log();
+    $di['mod_service'] = $di->protect(fn ($serviceName, $sub = '') => match ($serviceName) {
+        'currency' => $currencyService,
+        'client' => $clientService,
+        'Product' => $productService,
+        'order', 'Order' => $orderService,
+        default => null,
+    });
+
+    $orderService->setDi($di);
+    $serviceMock->setDi($di);
+
+    $result = $serviceMock->createFromCart($client);
+
+    expect($result[0])->toBeInstanceOf(Order::class);
+});
+
 test('usePromo throws exception when limit reached', function (): void {
     $promo = createPromoEntity(1);
 
@@ -1361,7 +1500,7 @@ test('addItem for license type returns true', function (): void {
     $eventMock = Mockery::mock(Box_EventManager::class)->shouldIgnoreMissing();
     $eventMock->shouldReceive('fire')->atLeast()->once();
 
-    $serviceLicenseServiceMock = Mockery::mock(Box\Mod\Servicelicense\Service::class);
+    $serviceLicenseServiceMock = Mockery::mock(Box\Mod\Servicelicense\Service::class)->shouldIgnoreMissing();
     $serviceLicenseServiceMock->shouldReceive('attachOrderConfig')->atLeast()->once()->andReturn([]);
     $serviceLicenseServiceMock->shouldReceive('validateOrderData')->atLeast()->once()->andReturn(true);
 
@@ -1614,6 +1753,7 @@ test('getProductDiscount returns free setup discount', function (): void {
     $di['em'] = $emMock;
     $productService = Mockery::mock(ProductService::class)->shouldIgnoreMissing();
     $productService->shouldReceive('findPromoById')->once()->with(1)->andReturn($promoModel);
+    $productService->shouldReceive('isPromoApplicableToProductById')->atLeast()->once()->andReturn(true);
     $di['mod_service'] = $di->protect(fn () => $productService);
 
     $serviceMock = Mockery::mock(Service::class)->makePartial()->shouldAllowMockingProtectedMethods();
@@ -1630,6 +1770,47 @@ test('getProductDiscount returns free setup discount', function (): void {
     expect($result[1])->toEqual($discountSetup);
 });
 
+test('getProductDiscount does not waive setup fee for a product the promo is not applicable to', function (): void {
+    $cartProductModel = new CartProduct();
+    $cpReflection = new ReflectionProperty($cartProductModel, 'id');
+    $cpReflection->setValue($cartProductModel, 1);
+
+    $modelCart = new Cart();
+    $cartReflection = new ReflectionProperty($modelCart, 'id');
+    $cartReflection->setValue($modelCart, 1);
+    $modelCart->setPromoId(1);
+
+    $promoModel = new Promo();
+    $promoModel->setFreeSetup(true);
+
+    $cartRepo = Mockery::mock(CartRepository::class);
+    $cartRepo->shouldReceive('find')->atLeast()->once()->with(Mockery::any())->andReturn($modelCart);
+
+    $emMock = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class);
+    $emMock->shouldReceive('getRepository')->with(Cart::class)->andReturn($cartRepo);
+
+    $di = container();
+    $di['em'] = $emMock;
+    $productService = Mockery::mock(ProductService::class)->shouldIgnoreMissing();
+    $productService->shouldReceive('findPromoById')->once()->with(1)->andReturn($promoModel);
+    // Promo is restricted to a different product/period, so it does not apply here.
+    $productService->shouldReceive('isPromoApplicableToProductById')->atLeast()->once()->andReturn(false);
+    $di['mod_service'] = $di->protect(fn () => $productService);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial()->shouldAllowMockingProtectedMethods();
+    $serviceMock->shouldReceive('getRelatedItemsDiscount')->atLeast()->once()->andReturn(0);
+    // getItemPromoDiscount correctly returns 0 for a non-applicable product.
+    $serviceMock->shouldReceive('getItemPromoDiscount')->atLeast()->once()->andReturn(0);
+
+    $serviceMock->setDi($di);
+    $setupPrice = 25;
+    $result = $serviceMock->getProductDiscount($cartProductModel, $setupPrice);
+
+    expect($result)->toBeArray();
+    expect($result[0])->toEqual(0);
+    expect($result[1])->toEqual(0);
+});
+
 test('isPromoAvailableForClientGroup returns expected result', function (Promo $promo, ?Client $client, bool $expectedResult): void {
     $productService = Mockery::mock(ProductService::class);
     $productService->shouldReceive('isPromoAvailableForClientGroup')->once()->with($promo)->andReturn($expectedResult);
@@ -1643,13 +1824,133 @@ test('isPromoAvailableForClientGroup returns expected result', function (Promo $
     $result = $service->isPromoAvailableForClientGroup($promo);
 
     expect($result)->toEqual($expectedResult);
-})->with(function () {
-    return [
-        [createPromoEntity(1)->setClientGroups(json_encode([])), createEntity(Client::class), true],
-        [createPromoEntity(2)->setClientGroups(json_encode([1, 2])), createEntity(Client::class, ['clientGroupId' => null]), false],
-        [createPromoEntity(3)->setClientGroups(json_encode([1, 2])), createEntity(Client::class, ['clientGroupId' => 3]), false],
-        [createPromoEntity(4)->setClientGroups(json_encode([1, 2])), createEntity(Client::class, ['clientGroupId' => 2]), true],
-        [createPromoEntity(5)->setClientGroups(json_encode([])), null, true],
-        [createPromoEntity(6)->setClientGroups(json_encode([1, 2])), null, false],
+})->with(fn (): array => [
+    [createPromoEntity(1)->setClientGroups(json_encode([])), createEntity(Client::class), true],
+    [createPromoEntity(2)->setClientGroups(json_encode([1, 2])), createEntity(Client::class, ['clientGroupId' => null]), false],
+    [createPromoEntity(3)->setClientGroups(json_encode([1, 2])), createEntity(Client::class, ['clientGroupId' => 3]), false],
+    [createPromoEntity(4)->setClientGroups(json_encode([1, 2])), createEntity(Client::class, ['clientGroupId' => 2]), true],
+    [createPromoEntity(5)->setClientGroups(json_encode([])), null, true],
+    [createPromoEntity(6)->setClientGroups(json_encode([1, 2])), null, false],
+]);
+
+test('addItem strips client-injected hosting_plan_id', function (): void {
+    // A client must not be able to override the admin-configured hosting_plan_id
+    // by injecting it into the cart/add_item request. We assert this at the
+    // attachOrderConfig boundary: by the time the payload reaches
+    // Servicehosting::attachOrderConfig, the central filter in
+    // Product\Service::prepareCartProductConfig must have stripped the
+    // client-injected hosting_plan_id (and server_id).
+    $cartModel = new Cart();
+    $cartReflection = new ReflectionProperty($cartModel, 'id');
+    $cartReflection->setValue($cartModel, 1);
+
+    // Admin-configured product bound to hosting plan id 1.
+    $productModel = createProductEntity(
+        type: 'hosting',
+        config: json_encode([
+            'hosting_plan_id' => 1,
+            'server_id' => 1,
+            'allow_domain_own' => true,
+        ]),
+    );
+
+    // Attacker payload injects premium hosting_plan_id (2), plus a
+    // legitimate-looking domain action and billing period.
+    $attackerPayload = [
+        'period' => '1M',
+        'domain' => [
+            'action' => 'owndomain',
+            'owndomain_sld' => 'evil',
+            'owndomain_tld' => '.com',
+        ],
+        'hosting_plan_id' => 2,   // the CVE injection
+        'server_id' => 99,        // additional injected admin field
+        'multiple' => 1,
     ];
+
+    $eventMock = Mockery::mock(Box_EventManager::class)->shouldIgnoreMissing();
+    $eventMock->shouldReceive('fire')->atLeast()->once();
+
+    $productDomainModel = createProductEntity(type: 'domain');
+    $domainProduct = ['config' => [], 'product' => $productDomainModel];
+
+    // Partial mock of Servicehosting with the REAL clientSettableConfigKeys
+    // (so the central filter actually runs), but stubbed attachOrderConfig to
+    // capture the filtered payload it would receive.
+    $serviceHostingServiceMock = Mockery::mock(Box\Mod\Servicehosting\Service::class)->makePartial();
+    $serviceHostingServiceMock->shouldReceive('getDomainProductFromConfig')->atLeast()->once()->andReturn($domainProduct);
+    $serviceHostingServiceMock->shouldReceive('validateOrderData')->atLeast()->once()->andReturn(null);
+
+    $capturedAttachInputs = [];
+    $serviceHostingServiceMock->shouldReceive('attachOrderConfig')
+        ->atLeast()->once()
+        ->andReturnUsing(function (Product $product, array $data) use (&$capturedAttachInputs): array {
+            $capturedAttachInputs[] = $data;
+
+            return $data;
+        });
+
+    $productService = new ProductService();
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial()->shouldAllowMockingProtectedMethods();
+    $serviceMock->shouldReceive('isRecurrentPricing')->atLeast()->once()->andReturn(false);
+    $serviceMock->shouldReceive('isStockAvailable')->atLeast()->once()->andReturn(true);
+    $serviceMock->shouldReceive('addProduct')->atLeast()->once();
+
+    $cartProductRepo = Mockery::mock(CartProductRepository::class);
+    $cartProductRepo->shouldReceive('findByCartId')->atLeast()->once()->andReturn([]);
+
+    $emMock = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class);
+    $emMock->shouldReceive('getRepository')->with(CartProduct::class)->andReturn($cartProductRepo);
+
+    $di = container();
+    $di['em'] = $emMock;
+    $di['events_manager'] = $eventMock;
+    $di['mod_service'] = $di->protect(function ($name) use ($serviceHostingServiceMock, $productService) {
+        if ($name === 'Product') {
+            return $productService;
+        }
+
+        return $serviceHostingServiceMock;
+    });
+    $di['logger'] = new Box_Log();
+
+    $productService->setDi($di);
+    $serviceHostingServiceMock->setDi($di);
+    $serviceMock->setDi($di);
+
+    $result = $serviceMock->addItem($cartModel, $productModel, $attackerPayload);
+    expect($result)->toBeTrue();
+
+    // The filter must have run (the call must have reached attachOrderConfig
+    // at least once for the hosting product).
+    expect($capturedAttachInputs)->not->toBeEmpty('attachOrderConfig was not called; test setup is broken');
+
+    // attachOrderConfig is called once per item in the cart-add $list
+    // (hosting product + domain product). Identify the hosting call by the
+    // presence of the legitimate client payload keys (period / domain).
+    $hostingCall = null;
+    foreach ($capturedAttachInputs as $capturedAttachInput) {
+        if (isset($capturedAttachInput['domain']) || isset($capturedAttachInput['period'])) {
+            $hostingCall = $capturedAttachInput;
+
+            break;
+        }
+    }
+    expect($hostingCall)->not->toBeNull('hosting-item attachOrderConfig call not captured; test setup is broken');
+
+    // The attacker-injected admin-controlled keys must NOT have survived the
+    // filter. The admin-configured values for these keys will be merged back
+    // inside attachOrderConfig itself (Servicehosting does array_merge with
+    // the product config there); we are testing the filter boundary, so we
+    // assert they were dropped from the client payload before that merge.
+    expect($hostingCall)->not->toHaveKey('hosting_plan_id');
+    expect($hostingCall)->not->toHaveKey('server_id');
+
+    // Legitimate client-settable keys survive the filter and reach
+    // attachOrderConfig intact.
+    expect($hostingCall)->toHaveKey('period');
+    expect($hostingCall)->toHaveKey('domain');
+    expect($hostingCall)->toHaveKey('multiple');
+    expect($hostingCall['domain'])->toHaveKey('action', 'owndomain');
 });

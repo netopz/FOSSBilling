@@ -14,6 +14,7 @@ use Box\Mod\Client\Entity\Client;
 use Box\Mod\Product\Entity\Product;
 use Box\Mod\Product\Entity\ProductCategory;
 use Box\Mod\Product\Entity\ProductPayment;
+use Box\Mod\Product\Entity\ProductPaymentPeriod;
 use Box\Mod\Product\Entity\Promo;
 use Box\Mod\Product\Entity\PromoRedemption;
 use Box\Mod\Product\Repository\ProductCategoryRepository;
@@ -22,6 +23,7 @@ use Box\Mod\Product\Repository\ProductRepository;
 use Box\Mod\Product\Repository\PromoRedemptionRepository;
 use Box\Mod\Product\Repository\PromoRepository;
 use Box\Mod\Product\Service;
+use Box\Mod\Servicedomain\Entity\Tld;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
 
@@ -64,15 +66,18 @@ function productTestCreateProductPaymentEntity(int $id): ProductPayment
     return $productPayment;
 }
 
-function productTestCreateTldModel(array $properties = []): Model_Tld
+function productTestAddPeriod(ProductPayment $productPayment, string $code, float $price, float $setup, bool $enabled = true): ProductPayment
 {
-    $tld = new Model_Tld();
-    $tld->loadBean(new Tests\Helpers\DummyBean());
-    foreach ($properties as $name => $value) {
-        $tld->$name = $value;
-    }
+    $period = new ProductPaymentPeriod();
+    $period->setCode($code)->setPrice($price)->setSetupPrice($setup)->setEnabled($enabled);
+    $productPayment->addPeriod($period);
 
-    return $tld;
+    return $productPayment;
+}
+
+function productTestCreateTldModel(array $properties = []): Tld
+{
+    return createEntity(Tld::class, $properties);
 }
 
 function productTestCreateInvoiceModel(int $id): Model_Invoice
@@ -210,7 +215,7 @@ function productTestCreateProductOrderDbalConnection(): Connection
     return $connection;
 }
 
-function productTestCreateDomainTldServiceMock(Model_Tld $tld): Mockery\MockInterface
+function productTestCreateDomainTldServiceMock(Tld $tld): Mockery\MockInterface
 {
     $tldService = Mockery::mock(Box\Mod\Servicedomain\ServiceTld::class);
     $tldService->shouldReceive('findOneByTld')->atLeast()->once()->with('.com')->andReturn($tld);
@@ -472,8 +477,8 @@ test('get product order line config uses product payment pricing for recurring p
         ->setProductPaymentId(15);
 
     $productPayment = productTestCreateProductPaymentEntity(15)
-        ->setType(ProductPayment::RECURRENT)
-        ->setPeriodPricing('a', 20.0, 5.0, true);
+        ->setType(ProductPayment::RECURRENT);
+    productTestAddPeriod($productPayment, '1Y', 20.0, 5.0, true);
 
     $paymentRepo = Mockery::mock(ProductPaymentRepository::class);
     $paymentRepo->shouldReceive('find')->twice()->with(15)->andReturn($productPayment);
@@ -494,8 +499,8 @@ test('get product renewal line config uses generic pricing implementation', func
         ->setProductPaymentId(15);
 
     $productPayment = productTestCreateProductPaymentEntity(15)
-        ->setType(ProductPayment::RECURRENT)
-        ->setPeriodPricing('a', 20.0, 5.0, true);
+        ->setType(ProductPayment::RECURRENT);
+    productTestAddPeriod($productPayment, '1Y', 20.0, 5.0, true);
 
     $paymentRepo = Mockery::mock(ProductPaymentRepository::class);
     $paymentRepo->shouldReceive('find')->twice()->with(15)->andReturn($productPayment);
@@ -752,12 +757,10 @@ test('update product', function (): void {
         'pricing' => [
             'type' => ProductPayment::RECURRENT,
             ProductPayment::RECURRENT => [
-                [
-                    '1W' => [
-                        'setup' => '',
-                        'price' => '',
-                        'enabled' => true,
-                    ],
+                '1W' => [
+                    'setup' => '',
+                    'price' => '',
+                    'enabled' => true,
                 ],
             ],
         ],
@@ -775,6 +778,7 @@ test('update product', function (): void {
         'stock_control' => false,
         'allow_quantity_select' => false,
         'quantity_in_stock' => 0,
+        'suspension_grace_days' => 5,
         'description' => 'Product description',
         'plugin' => 'plug in',
     ];
@@ -793,8 +797,17 @@ test('update product', function (): void {
     $serviceMock->setDi($di);
 
     $result = $serviceMock->updateProduct($modelProduct, $data);
-    expect($result)->toBeTrue();
+    expect($result)->toBeTrue()
+        ->and($modelProduct->getSuspensionGraceDays())->toBe(5);
 });
+
+test('update product rejects invalid suspension grace days', function (mixed $invalidGraceDays): void {
+    $service = new Service();
+    $product = productTestCreateProductEntity(1);
+
+    expect(fn (): bool => $service->updateProduct($product, ['suspension_grace_days' => $invalidGraceDays]))
+        ->toThrow(FOSSBilling\InformationException::class, 'Suspension grace days must be a non-negative integer.');
+})->with([-1, '-1', '1.5', '01', PHP_INT_MAX . '0']);
 
 test('update priority', function (): void {
     $service = new Service();
@@ -1512,21 +1525,9 @@ test('is promo available for client group', function (Promo $promo, ?Client $cli
     expect($service->isPromoAvailableForClientGroup($promo))->toBe($expectedResult);
 })->with([
     'no restrictions' => [fn (): Promo => productTestCreatePromoEntity(1)->setClientGroups(json_encode([])), fn (): Client => $client = createEntity(Client::class), true],
-    'restricted and no client group' => [fn (): Promo => productTestCreatePromoEntity(2)->setClientGroups(json_encode([1, 2])), function () {
-        $client = createEntity(Client::class, ['client_group_id' => null]);
-
-        return $client;
-    }, false],
-    'restricted and wrong client group' => [fn (): Promo => productTestCreatePromoEntity(3)->setClientGroups(json_encode([1, 2])), function () {
-        $client = createEntity(Client::class, ['client_group_id' => 3]);
-
-        return $client;
-    }, false],
-    'restricted and matching client group' => [fn (): Promo => productTestCreatePromoEntity(4)->setClientGroups(json_encode([1, 2])), function () {
-        $client = createEntity(Client::class, ['client_group_id' => 2]);
-
-        return $client;
-    }, true],
+    'restricted and no client group' => [fn (): Promo => productTestCreatePromoEntity(2)->setClientGroups(json_encode([1, 2])), fn (): object => createEntity(Client::class, ['client_group_id' => null]), false],
+    'restricted and wrong client group' => [fn (): Promo => productTestCreatePromoEntity(3)->setClientGroups(json_encode([1, 2])), fn (): object => createEntity(Client::class, ['client_group_id' => 3]), false],
+    'restricted and matching client group' => [fn (): Promo => productTestCreatePromoEntity(4)->setClientGroups(json_encode([1, 2])), fn (): object => createEntity(Client::class, ['client_group_id' => 2]), true],
     'no restrictions and no client' => [fn (): Promo => productTestCreatePromoEntity(5)->setClientGroups(json_encode([])), null, true],
     'restricted and no client' => [fn (): Promo => productTestCreatePromoEntity(6)->setClientGroups(json_encode([1, 2])), null, false],
 ]);
@@ -2097,17 +2098,156 @@ test('get starting price', function (): void {
 
     $minPrice = 1;
 
-    $productPaymentModel->setPeriodPricing('w', 2, 0, true);
-    $productPaymentModel->setPeriodPricing('m', 4, 0, true);
-    $productPaymentModel->setPeriodPricing('q', 8, 0, true);
-    $productPaymentModel->setPeriodPricing('b', $minPrice, 0, true);
-    $productPaymentModel->setPeriodPricing('a', 10, 0, true);
-    $productPaymentModel->setPeriodPricing('bia', 12, 0, true);
-    $productPaymentModel->setPeriodPricing('tria', 14, 0, true);
+    productTestAddPeriod($productPaymentModel, '1W', 2, 0, true);
+    productTestAddPeriod($productPaymentModel, '1M', 4, 0, true);
+    productTestAddPeriod($productPaymentModel, '3M', 8, 0, true);
+    productTestAddPeriod($productPaymentModel, '6M', $minPrice, 0, true);
+    productTestAddPeriod($productPaymentModel, '1Y', 10, 0, true);
+    productTestAddPeriod($productPaymentModel, '2Y', 12, 0, true);
+    productTestAddPeriod($productPaymentModel, '3Y', 14, 0, true);
 
     $result = $service->getStartingPrice($productPaymentModel);
     expect($result)->toBeNumeric();
     expect($result)->toEqual($minPrice);
+});
+
+test('to product payment api array includes custom periods with a computed title', function (): void {
+    $service = new Service();
+    $productPaymentModel = productTestCreateProductPaymentEntity(1)
+        ->setType(ProductPayment::RECURRENT);
+
+    productTestAddPeriod($productPaymentModel, '45D', 7.5, 1, true);
+    productTestAddPeriod($productPaymentModel, '4Y', 100, 0, false);
+
+    $result = $service->toProductPaymentApiArray($productPaymentModel);
+
+    expect($result[ProductPayment::RECURRENT])->toHaveKeys(['45D', '4Y']);
+    expect($result[ProductPayment::RECURRENT]['45D'])->toEqual([
+        'price' => 7.5,
+        'setup' => 1.0,
+        'enabled' => true,
+        // The test bootstrap's __pluralTrans stub always substitutes into the singular
+        // form, so this deliberately does not assert "days"/"years" pluralization.
+        'title' => 'Every 45 day',
+    ]);
+    expect($result[ProductPayment::RECURRENT]['4Y']['enabled'])->toBeFalse();
+    expect($result[ProductPayment::RECURRENT]['4Y']['title'])->toBe('Every 4 year');
+});
+
+test('get product price resolves a custom period by exact code', function (): void {
+    $service = new Service();
+    $product = productTestCreateProductEntity(9)
+        ->setType(Service::CUSTOM)
+        ->setProductPaymentId(15);
+
+    $productPayment = productTestCreateProductPaymentEntity(15)
+        ->setType(ProductPayment::RECURRENT);
+    productTestAddPeriod($productPayment, '45D', 7.5, 1, true);
+
+    $paymentRepo = Mockery::mock(ProductPaymentRepository::class);
+    $paymentRepo->shouldReceive('find')->once()->with(15)->andReturn($productPayment);
+
+    $di = container();
+    $di['em'] = productTestCreateProductPaymentEntityManager($paymentRepo);
+    $service->setDi($di);
+
+    expect($service->getProductPrice($product, ['period' => '45D']))->toBe(7.5);
+});
+
+test('get product price rejects a period that is not configured for the product', function (): void {
+    $service = new Service();
+    $product = productTestCreateProductEntity(9)
+        ->setType(Service::CUSTOM)
+        ->setProductPaymentId(15);
+
+    $productPayment = productTestCreateProductPaymentEntity(15)
+        ->setType(ProductPayment::RECURRENT);
+    productTestAddPeriod($productPayment, '1M', 5, 0, true);
+
+    $paymentRepo = Mockery::mock(ProductPaymentRepository::class);
+    $paymentRepo->shouldReceive('find')->once()->with(15)->andReturn($productPayment);
+
+    $di = container();
+    $di['em'] = productTestCreateProductPaymentEntityManager($paymentRepo);
+    $service->setDi($di);
+
+    expect(fn (): float|int|string => $service->getProductPrice($product, ['period' => '3Y']))
+        ->toThrow(FOSSBilling\InformationException::class, 'Selected billing period is not available for this product');
+});
+
+test('update product accepts a custom recurring period and drops periods no longer submitted', function (): void {
+    $modelProduct = productTestCreateProductEntity(1)->setProductPaymentId(1);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getPaymentTypes')->atLeast()->once()->andReturn([
+        'free' => 'Free',
+        'once' => 'One time',
+        'recurrent' => 'Recurrent',
+    ]);
+
+    $productPayment = productTestCreateProductPaymentEntity(1)
+        ->setType(ProductPayment::RECURRENT);
+    productTestAddPeriod($productPayment, '1M', 5, 0, true);
+    productTestAddPeriod($productPayment, '1Y', 40, 0, true);
+
+    $paymentRepo = Mockery::mock(ProductPaymentRepository::class);
+    $paymentRepo->shouldReceive('find')->once()->with(1)->andReturn($productPayment);
+
+    $di = container();
+    $di['em'] = productTestCreateProductPaymentEntityManager($paymentRepo);
+    $di['logger'] = new Box_Log();
+    $serviceMock->setDi($di);
+
+    $data = [
+        'pricing' => [
+            'type' => ProductPayment::RECURRENT,
+            'recurrent' => [
+                // '1M' is intentionally omitted, so it should be removed.
+                '1Y' => ['price' => 45, 'setup' => 0, 'enabled' => true],
+                '18M' => ['price' => 60, 'setup' => 5, 'enabled' => true],
+            ],
+        ],
+    ];
+
+    $result = $serviceMock->updateProduct($modelProduct, $data);
+
+    expect($result)->toBeTrue();
+    expect($productPayment->getPeriod('1M'))->toBeNull();
+    expect($productPayment->getPeriod('1Y')->getPrice())->toBe(45.0);
+    expect($productPayment->getPeriod('18M')->getPrice())->toBe(60.0);
+});
+
+test('update product rejects an invalid custom period code', function (): void {
+    $modelProduct = productTestCreateProductEntity(1)->setProductPaymentId(1);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getPaymentTypes')->atLeast()->once()->andReturn([
+        'free' => 'Free',
+        'once' => 'One time',
+        'recurrent' => 'Recurrent',
+    ]);
+
+    $productPayment = productTestCreateProductPaymentEntity(1)->setType(ProductPayment::RECURRENT);
+
+    $paymentRepo = Mockery::mock(ProductPaymentRepository::class);
+    $paymentRepo->shouldReceive('find')->once()->with(1)->andReturn($productPayment);
+
+    $di = container();
+    $di['em'] = productTestCreateProductPaymentEntityManager($paymentRepo);
+    $di['logger'] = new Box_Log();
+    $serviceMock->setDi($di);
+
+    $data = [
+        'pricing' => [
+            'type' => ProductPayment::RECURRENT,
+            'recurrent' => [
+                '10Y' => ['price' => 5, 'setup' => 0, 'enabled' => true],
+            ],
+        ],
+    ];
+
+    expect(fn () => $serviceMock->updateProduct($modelProduct, $data))
+        ->toThrow(FOSSBilling\InformationException::class, 'Invalid billing period 10Y');
 });
 
 test('can upgrade to returns true', function (): void {
@@ -2159,4 +2299,124 @@ test('assert upgrade allowed by ids throws helpful exception', function (): void
 
     expect(fn () => $serviceMock->assertUpgradeAllowedByIds(1, 2))
         ->toThrow(FOSSBilling\InformationException::class, 'Sorry, but "Starter" is not allowed to be upgraded to "Pro"');
+});
+
+test('prepareCartProductConfig strips client-supplied admin-controlled keys', function (): void {
+    $service = new Service();
+
+    $product = productTestCreateProductEntity(1)
+        ->setType('hosting')
+        ->setConfig('{"hosting_plan_id":1,"server_id":2,"allow_domain_register":true}');
+
+    // Real class implementing the contract. Using stdClass + a closure property
+    // would NOT satisfy method_exists(), which is how the central filter detects
+    // the allowlist. An anonymous class is the smallest vehicle that does.
+    $hostingService = new class {
+        public function clientSettableConfigKeys(): array
+        {
+            return ['period', 'domain', 'quantity'];
+        }
+    };
+
+    $di = container();
+    $di['mod_service'] = $di->protect(fn (string $serviceName): object => match ($serviceName) {
+        'servicehosting' => $hostingService,
+        default => throw new RuntimeException('Unexpected service request ' . $serviceName),
+    });
+
+    $service->setDi($di);
+
+    $clientConfig = [
+        'period' => '1M',
+        'domain' => ['action' => 'owndomain', 'owndomain_sld' => 'example', 'owndomain_tld' => '.com'],
+        'quantity' => 1,
+        'hosting_plan_id' => 999,   // injected - should be stripped
+        'server_id' => 999,         // injected - should be stripped
+        'reseller' => true,         // injected - should be stripped
+    ];
+
+    $result = $service->prepareCartProductConfig($product, $clientConfig);
+
+    // Allowlisted client fields pass through.
+    expect($result)->toHaveKey('period');
+    expect($result)->toHaveKey('domain');
+    expect($result)->toHaveKey('quantity');
+
+    // Client-injected admin-controlled fields are stripped. Any values for
+    // those fields present in the result must come from attachOrderConfig's
+    // own merge with the product config, not from the client input. Since
+    // our stub here has no attachOrderConfig, no merge happens - so the
+    // injected keys must be absent entirely.
+    expect($result)->not->toHaveKey('hosting_plan_id');
+    expect($result)->not->toHaveKey('server_id');
+    expect($result)->not->toHaveKey('reseller');
+});
+
+test('prepareCartProductConfig preserves all allowlisted client keys', function (): void {
+    $service = new Service();
+
+    $product = productTestCreateProductEntity(1)
+        ->setType('hosting')
+        ->setConfig('{"hosting_plan_id":1}');
+
+    $hostingService = new class {
+        public function clientSettableConfigKeys(): array
+        {
+            return ['period', 'domain', 'quantity', 'multiple'];
+        }
+    };
+
+    $di = container();
+    $di['mod_service'] = $di->protect(fn (string $serviceName): object => match ($serviceName) {
+        'servicehosting' => $hostingService,
+        default => throw new RuntimeException('Unexpected service request ' . $serviceName),
+    });
+
+    $service->setDi($di);
+
+    $clientConfig = [
+        'period' => '1Y',
+        'domain' => ['action' => 'owndomain', 'owndomain_sld' => 'example', 'owndomain_tld' => '.com'],
+        'quantity' => 2,
+        'multiple' => 1,
+    ];
+
+    $result = $service->prepareCartProductConfig($product, $clientConfig);
+
+    expect($result['period'])->toBe('1Y');
+    expect($result['quantity'])->toBe(2);
+    expect($result['multiple'])->toBe(1);
+    expect($result['domain'])->toHaveKey('action', 'owndomain');
+});
+
+test('prepareCartProductConfig does not filter when service has no clientSettableConfigKeys', function (): void {
+    $service = new Service();
+
+    // A custom service that does NOT implement the contract.
+    $product = productTestCreateProductEntity(1)
+        ->setType('custom')
+        ->setConfig('{"some_admin_field":"admin_value"}');
+
+    $customService = new stdClass();
+
+    $di = container();
+    $di['mod_service'] = $di->protect(fn (string $serviceName): object => match ($serviceName) {
+        'servicecustom' => $customService,
+        default => throw new RuntimeException('Unexpected service request ' . $serviceName),
+    });
+
+    $service->setDi($di);
+
+    $clientConfig = [
+        'period' => '1M',
+        'arbitrary_field' => 'attacker_value',
+        'another_field' => 12345,
+    ];
+
+    $result = $service->prepareCartProductConfig($product, $clientConfig);
+
+    // Backward-compat: nothing is stripped when the contract is unimplemented.
+    expect($result)->toHaveKey('arbitrary_field', 'attacker_value');
+    expect($result)->toHaveKey('another_field', 12345);
+    expect($result)->toHaveKey('period', '1M');
 });

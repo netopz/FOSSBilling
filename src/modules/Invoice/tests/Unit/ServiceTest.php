@@ -10,11 +10,20 @@
 
 declare(strict_types=1);
 
+use Box\Mod\Client\Entity\ClientBalance;
 use Box\Mod\Client\Service as ClientService;
 use Box\Mod\Currency\Entity\Currency as CurrencyEntity;
 use Box\Mod\Currency\Repository\CurrencyRepository;
 use Box\Mod\Currency\Service as CurrencyService;
 use Box\Mod\Email\Service as EmailService;
+use Box\Mod\Invoice\Entity\InvoiceItem;
+use Box\Mod\Invoice\Entity\PayGateway;
+use Box\Mod\Invoice\Entity\Subscription;
+use Box\Mod\Invoice\Entity\Transaction;
+use Box\Mod\Invoice\Repository\InvoiceItemRepository;
+use Box\Mod\Invoice\Repository\PayGatewayRepository;
+use Box\Mod\Invoice\Repository\SubscriptionRepository;
+use Box\Mod\Invoice\Repository\TransactionRepository;
 use Box\Mod\Invoice\Service;
 use Box\Mod\Invoice\ServiceInvoiceItem;
 use Box\Mod\Invoice\ServicePayGateway;
@@ -24,9 +33,23 @@ use Box\Mod\Order\Service as OrderService;
 use Box\Mod\Product\Entity\Product;
 use Box\Mod\Product\Service as ProductService;
 use Box\Mod\System\Service as SystemService;
+use Doctrine\ORM\EntityManagerInterface;
 
 use function Tests\Helpers\container;
+use function Tests\Helpers\createEntity;
 use function Tests\Helpers\moduleService;
+
+/**
+ * @return array{0: EntityManagerInterface, 1: InvoiceItemRepository}
+ */
+function invoiceItemEmAndRepo(): array
+{
+    $repo = Mockery::mock(InvoiceItemRepository::class);
+    $em = Mockery::mock(EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->with(InvoiceItem::class)->andReturn($repo);
+
+    return [$em, $repo];
+}
 
 test('gets dependency injection container', function (): void {
     $service = new Service();
@@ -53,7 +76,7 @@ test('gets search query with various parameters', function (array $data, string 
         ['order_id' => '1'],
         'AND pi.type = :item_type AND pi.rel_id = :order_id',
         [
-            'item_type' => Model_InvoiceItem::TYPE_ORDER,
+            'item_type' => InvoiceItem::TYPE_ORDER,
             'order_id' => 1,
         ],
     ],
@@ -166,8 +189,7 @@ test('converts to api array', function (): void {
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
     $invoiceModel->hash = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4';
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $systemService = Mockery::mock(SystemService::class);
     $systemService->shouldReceive('getCompany')
@@ -219,7 +241,8 @@ test('converts to api array', function (): void {
     $dbMock->shouldReceive('toArray')
         ->atLeast()->once()
         ->andReturn($modelToArrayResult);
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([$invoiceItemModel]);
     $dbMock->shouldReceive('getCell')
@@ -235,6 +258,7 @@ test('converts to api array', function (): void {
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(function ($serviceName, $sub = '') use ($systemService, $subscriptionServiceMock, $invoiceItemServiceMock) {
         $service = null;
         if ($sub == 'InvoiceItem') {
@@ -404,8 +428,7 @@ test('to api array self-heals invoice with missing hash', function (): void {
     $invoiceModel = new Model_Invoice();
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $systemService = Mockery::mock(SystemService::class);
     $systemService->shouldReceive('getCompany')->atLeast()->once();
@@ -466,7 +489,8 @@ test('to api array self-heals invoice with missing hash', function (): void {
 
             return $modelToArrayResult;
         });
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([$invoiceItemModel]);
     $dbMock->shouldReceive('getCell')
@@ -482,6 +506,7 @@ test('to api array self-heals invoice with missing hash', function (): void {
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(function ($serviceName, $sub = '') use ($systemService, $subscriptionServiceMock, $invoiceItemServiceMock) {
         $service = null;
         if ($sub === 'InvoiceItem') {
@@ -1148,8 +1173,7 @@ test('marks invoice as paid', function (): void {
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
     $invoiceModel->status = Model_Invoice::STATUS_UNPAID;
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $itemInvoiceServiceMock = Mockery::mock(ServiceInvoiceItem::class);
     $itemInvoiceServiceMock->shouldReceive('markAsPaid')
@@ -1176,7 +1200,8 @@ test('marks invoice as paid', function (): void {
         ->atLeast()->once();
 
     $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([$invoiceItemModel]);
     $dbMock->shouldReceive('store')
@@ -1199,6 +1224,7 @@ test('marks invoice as paid', function (): void {
         }
     });
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['events_manager'] = $eventManagerMock;
     $di['logger'] = new Tests\Helpers\TestLogger();
 
@@ -1225,16 +1251,14 @@ test('admin mark as paid with custom gateway records transaction and marks invoi
     $invoiceModel->currency = 'USD';
     $invoiceModel->status = Model_Invoice::STATUS_UNPAID;
 
-    $gatewayModel = new Model_PayGateway();
-    $gatewayModel->loadBean(new Tests\Helpers\DummyBean());
-    $gatewayModel->id = 5;
-    $gatewayModel->gateway = 'Custom';
-    $gatewayModel->enabled = 1;
-    $gatewayModel->title = 'Manual payment';
+    $gatewayModel = createEntity(PayGateway::class, [
+        'id' => 5,
+        'gateway' => 'Custom',
+        'enabled' => true,
+        'name' => 'Manual payment',
+    ]);
 
-    $transactionModel = new Model_Transaction();
-    $transactionModel->loadBean(new Tests\Helpers\DummyBean());
-    $transactionModel->invoice_id = 10;
+    $transactionModel = createEntity(Transaction::class, ['id' => 20, 'invoiceId' => 10]);
 
     $transactionServiceMock = Mockery::mock(Box\Mod\Invoice\ServiceTransaction::class);
     $transactionServiceMock->shouldReceive('create')
@@ -1248,22 +1272,15 @@ test('admin mark as paid with custom gateway records transaction and marks invoi
         ->andReturn(20);
     $transactionServiceMock->shouldNotReceive('processTransaction');
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('getExistingModelById')
-        ->once()
-        ->with('PayGateway', 5, 'Payment gateway not found')
-        ->andReturn($gatewayModel);
-    $dbMock->shouldReceive('getExistingModelById')
-        ->once()
-        ->with('Transaction', 20, 'Transaction not found')
-        ->andReturn($transactionModel);
-    $dbMock->shouldReceive('store')
-        ->once()
-        ->with($transactionModel)
-        ->andReturn(20);
+    $em = Mockery::mock(EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->with(PayGateway::class)->andReturn($gatewayRepo = Mockery::mock(PayGatewayRepository::class));
+    $gatewayRepo->shouldReceive('find')->once()->with(5)->andReturn($gatewayModel);
+    $em->shouldReceive('getRepository')->with(Transaction::class)->andReturn($transactionRepo = Mockery::mock(TransactionRepository::class));
+    $transactionRepo->shouldReceive('find')->once()->with(20)->andReturn($transactionModel);
+    $em->shouldReceive('flush')->once();
 
     $di = container();
-    $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(moduleService([
         'invoice:transaction' => $transactionServiceMock,
     ]));
@@ -1276,10 +1293,10 @@ test('admin mark as paid with custom gateway records transaction and marks invoi
     ]);
 
     expect($result)->toBeTrue()
-        ->and($transactionModel->amount)->toBe(42.50)
-        ->and($transactionModel->currency)->toBe('USD')
-        ->and($transactionModel->status)->toBe(Model_Transaction::STATUS_PROCESSED)
-        ->and($transactionModel->note)->toBe('Manual payment transaction No: manual-reference-1');
+        ->and($transactionModel->getAmount())->toBe('42.5')
+        ->and($transactionModel->getCurrency())->toBe('USD')
+        ->and($transactionModel->getStatus())->toBe(Transaction::STATUS_PROCESSED)
+        ->and($transactionModel->getNote())->toBe('Manual payment transaction No: manual-reference-1');
 });
 
 test('admin mark as paid with custom gateway rejects transaction linked to another invoice', function (): void {
@@ -1297,34 +1314,28 @@ test('admin mark as paid with custom gateway rejects transaction linked to anoth
     $invoiceModel->currency = 'USD';
     $invoiceModel->status = Model_Invoice::STATUS_UNPAID;
 
-    $gatewayModel = new Model_PayGateway();
-    $gatewayModel->loadBean(new Tests\Helpers\DummyBean());
-    $gatewayModel->id = 5;
-    $gatewayModel->gateway = 'Custom';
-    $gatewayModel->enabled = 1;
+    $gatewayModel = createEntity(PayGateway::class, [
+        'id' => 5,
+        'gateway' => 'Custom',
+        'enabled' => true,
+    ]);
 
-    $transactionModel = new Model_Transaction();
-    $transactionModel->loadBean(new Tests\Helpers\DummyBean());
-    $transactionModel->invoice_id = 99;
+    $transactionModel = createEntity(Transaction::class, ['id' => 20, 'invoiceId' => 99]);
 
     $transactionServiceMock = Mockery::mock(Box\Mod\Invoice\ServiceTransaction::class);
     $transactionServiceMock->shouldReceive('create')
         ->once()
         ->andReturn(20);
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('getExistingModelById')
-        ->once()
-        ->with('PayGateway', 5, 'Payment gateway not found')
-        ->andReturn($gatewayModel);
-    $dbMock->shouldReceive('getExistingModelById')
-        ->once()
-        ->with('Transaction', 20, 'Transaction not found')
-        ->andReturn($transactionModel);
-    $dbMock->shouldNotReceive('store');
+    $em = Mockery::mock(EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->with(PayGateway::class)->andReturn($gatewayRepo = Mockery::mock(PayGatewayRepository::class));
+    $gatewayRepo->shouldReceive('find')->once()->with(5)->andReturn($gatewayModel);
+    $em->shouldReceive('getRepository')->with(Transaction::class)->andReturn($transactionRepo = Mockery::mock(TransactionRepository::class));
+    $transactionRepo->shouldReceive('find')->once()->with(20)->andReturn($transactionModel);
+    $em->shouldNotReceive('flush');
 
     $di = container();
-    $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(moduleService([
         'invoice:transaction' => $transactionServiceMock,
     ]));
@@ -1350,7 +1361,8 @@ test('counts income', function (): void {
         ->andReturn(0.0);
 
     $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([]);
     $dbMock->shouldReceive('store')
@@ -1358,6 +1370,7 @@ test('counts income', function (): void {
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $currencyService);
 
     $serviceMock->setDi($di);
@@ -1598,16 +1611,59 @@ test('pays a zero-total invoice without recording a balance transaction', functi
     expect($service->tryPayWithCredits($invoice))->toBeTrue();
 });
 
+test('pays an invoice with credits and records a balance transaction', function (): void {
+    $invoice = new Model_Invoice();
+    $invoice->loadBean(new Tests\Helpers\DummyBean());
+    $invoice->id = 10;
+    $invoice->nr = '2024-001';
+    $invoice->client_id = 20;
+    $invoice->approved = 1;
+    $invoice->status = Model_Invoice::STATUS_UNPAID;
+
+    $client = new Model_Client();
+    $client->loadBean(new Tests\Helpers\DummyBean());
+    $client->id = 20;
+
+    $balanceService = Mockery::mock(Box\Mod\Client\ServiceBalance::class);
+    $balanceService->shouldReceive('getClientBalance')->once()->with($client)->andReturn(100.0);
+
+    $db = Mockery::mock(Box_Database::class);
+    $db->shouldReceive('load')->once()->with('Client', 20)->andReturn($client);
+    $db->shouldNotReceive('dispense');
+    $db->shouldNotReceive('store');
+
+    $service = Mockery::mock(Service::class)->makePartial();
+    $service->shouldReceive('getTotalWithTax')->once()->with($invoice)->andReturn(50.0);
+    $service->shouldReceive('markAsPaid')->once()->with($invoice, false, true)->andReturn(true);
+
+    $di = container();
+    $di['db'] = $db;
+    $di['em']->shouldReceive('persist')->once()->with(
+        Mockery::on(function (ClientBalance $balance): bool {
+            return $balance->getClientId() === 20
+                && $balance->getType() === 'invoice'
+                && $balance->getRelId() === '10'
+                && $balance->getDescription() === 'Payment for invoice #2024-001 using account credit.'
+                && $balance->getAmount() === '-50';
+        })
+    );
+    $di['em']->shouldReceive('flush')->once();
+    $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $balanceService);
+    $service->setDi($di);
+
+    expect($service->tryPayWithCredits($invoice))->toBeTrue();
+});
+
 test('gets total', function (): void {
     $service = new Service();
     $invoiceModel = new Model_Invoice();
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([$invoiceItemModel]);
 
@@ -1619,6 +1675,7 @@ test('gets total', function (): void {
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $itemInvoiceServiceMock);
 
     $service->setDi($di);
@@ -1651,8 +1708,7 @@ test('refunds invoice with negative invoice logic', function (): void {
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
     $invoiceModel->id = $newId;
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $eventManagerMock = Mockery::mock('\Box_EventManager');
     $eventManagerMock->shouldReceive('fire')
@@ -1663,21 +1719,25 @@ test('refunds invoice with negative invoice logic', function (): void {
         ->atLeast()->once()
         ->andReturn('negative_invoice');
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dispenseCount = 0;
-    $dbMock->shouldReceive('dispense')
-        ->atLeast()->once()
-        ->andReturnUsing(function () use (&$dispenseCount, $invoiceModel, $invoiceItemModel) {
-            return ++$dispenseCount === 1 ? $invoiceModel : $invoiceItemModel;
-        });
-    $dbMock->shouldReceive('store')
-        ->atLeast()->once();
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([$invoiceItemModel]);
+    $em->shouldReceive('persist')
+        ->atLeast()->once();
+    $em->shouldReceive('flush')
+        ->atLeast()->once();
+
+    $dbMock = Mockery::mock('\Box_Database');
+    $dbMock->shouldReceive('dispense')
+        ->atLeast()->once()
+        ->andReturn($invoiceModel);
+    $dbMock->shouldReceive('store')
+        ->atLeast()->once();
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $systemService);
     $di['events_manager'] = $eventManagerMock;
     $di['logger'] = new Tests\Helpers\TestLogger();
@@ -1725,8 +1785,7 @@ test('updates an invoice', function (): void {
     $invoiceModel = new Model_Invoice();
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $eventManagerMock = Mockery::mock('\Box_EventManager');
     $eventManagerMock->shouldReceive('fire')
@@ -1741,12 +1800,14 @@ test('updates an invoice', function (): void {
     $dbMock = Mockery::mock('\Box_Database');
     $dbMock->shouldReceive('store')
         ->atLeast()->once();
-    $dbMock->shouldReceive('load')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('find')
         ->atLeast()->once()
         ->andReturn($invoiceItemModel);
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $itemInvoiceServiceMock);
     $di['events_manager'] = $eventManagerMock;
     $di['logger'] = new Tests\Helpers\TestLogger();
@@ -1767,20 +1828,25 @@ test('removes an invoice', function (): void {
     $invoiceModel = new Model_Invoice();
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
 
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $dbMock = Mockery::mock('\Box_Database');
     $dbMock->shouldReceive('exec')
         ->atLeast()->once();
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn([$invoiceItemModel]);
+    $em->shouldReceive('remove')
+        ->atLeast()->once();
+    $em->shouldReceive('flush')
+        ->atLeast()->once();
     $dbMock->shouldReceive('trash')
         ->atLeast()->once();
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
 
     $service->setDi($di);
 
@@ -1949,7 +2015,7 @@ test('clears stale paid invoice reference when generating for order', function (
 
     $invoiceItemServiceMock = Mockery::mock(ServiceInvoiceItem::class);
     $invoiceItemServiceMock->shouldReceive('generateFromOrder')
-        ->with($newInvoice, $clientOrder, Model_InvoiceItem::TASK_RENEW, 10, Mockery::type('array'))
+        ->with($newInvoice, $clientOrder, InvoiceItem::TASK_RENEW, 10, Mockery::type('array'))
         ->once();
 
     $di = container();
@@ -2055,7 +2121,7 @@ test('generates invoice for active order using the order price, not the product 
 
     $invoiceItemServiceMock = Mockery::mock(ServiceInvoiceItem::class);
     $invoiceItemServiceMock->shouldReceive('generateFromOrder')
-        ->with($invoiceModel, $orderModel, Model_InvoiceItem::TASK_RENEW, 25, Mockery::on(fn ($line): bool => $line['price'] === 25 && $line['quantity'] === 1))
+        ->with($invoiceModel, $orderModel, InvoiceItem::TASK_RENEW, 25, Mockery::on(fn ($line): bool => $line['price'] === 25 && $line['quantity'] === 1))
         ->once();
 
     $di = container();
@@ -2179,25 +2245,33 @@ test('generates invoices for expiring orders', function (): void {
 
 test('activates paid invoices in batch', function (): void {
     $service = new Service();
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $itemInvoiceServiceMock = Mockery::mock(ServiceInvoiceItem::class);
     $itemInvoiceServiceMock->shouldReceive('executeTask')
         ->with($invoiceItemModel);
     $itemInvoiceServiceMock->shouldReceive('getAllNotExecutePaidItems')
         ->atLeast()->once()
-        ->andReturn([[]]);
+        ->andReturn([['id' => 1]]);
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('getExistingModelById')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('find')
         ->atLeast()->once()
         ->andReturn($invoiceItemModel);
 
+    $connection = Mockery::mock(Doctrine\DBAL\Connection::class);
+    $connection->shouldReceive('transactional')
+        ->once()
+        ->andReturnUsing(fn (callable $func) => $func($connection));
+    $connection->shouldReceive('fetchOne')
+        ->with('SELECT status FROM invoice_item WHERE id = :id FOR UPDATE', ['id' => 1])
+        ->andReturn(InvoiceItem::STATUS_PENDING_SETUP);
+    $em->shouldReceive('getConnection')->andReturn($connection);
+
     $di = container();
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $itemInvoiceServiceMock);
     $di['logger'] = new Tests\Helpers\TestLogger();
-    $di['db'] = $dbMock;
 
     $service->setDi($di);
     $result = $service->doBatchPaidInvoiceActivation();
@@ -2206,8 +2280,7 @@ test('activates paid invoices in batch', function (): void {
 
 test('handles exception during batch paid invoice activation', function (): void {
     $service = new Service();
-    $invoiceItemModel = new Model_InvoiceItem();
-    $invoiceItemModel->loadBean(new Tests\Helpers\DummyBean());
+    $invoiceItemModel = createEntity(InvoiceItem::class, []);
 
     $itemInvoiceServiceMock = Mockery::mock(ServiceInvoiceItem::class);
     $itemInvoiceServiceMock->shouldReceive('executeTask')
@@ -2215,21 +2288,61 @@ test('handles exception during batch paid invoice activation', function (): void
         ->andThrow(new FOSSBilling\Exception('testing exception..'));
     $itemInvoiceServiceMock->shouldReceive('getAllNotExecutePaidItems')
         ->atLeast()->once()
-        ->andReturn([[]]);
+        ->andReturn([['id' => 1]]);
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('getExistingModelById')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('find')
         ->atLeast()->once()
         ->andReturn($invoiceItemModel);
 
+    $connection = Mockery::mock(Doctrine\DBAL\Connection::class);
+    $connection->shouldReceive('transactional')
+        ->once()
+        ->andReturnUsing(fn (callable $func) => $func($connection));
+    $connection->shouldReceive('fetchOne')
+        ->with('SELECT status FROM invoice_item WHERE id = :id FOR UPDATE', ['id' => 1])
+        ->andReturn(InvoiceItem::STATUS_PENDING_SETUP);
+    $em->shouldReceive('getConnection')->andReturn($connection);
+    $em->shouldReceive('clear')->once();
+
     $di = container();
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $itemInvoiceServiceMock);
     $di['logger'] = new Tests\Helpers\TestLogger();
-    $di['db'] = $dbMock;
 
     $service->setDi($di);
     $result = $service->doBatchPaidInvoiceActivation();
     expect($result)->toBeBool()->toBeTrue();
+});
+
+test('skips invoice items already finalized by another process during batch activation', function (): void {
+    $service = new Service();
+
+    $itemInvoiceServiceMock = Mockery::mock(ServiceInvoiceItem::class);
+    $itemInvoiceServiceMock->shouldReceive('getAllNotExecutePaidItems')
+        ->atLeast()->once()
+        ->andReturn([['id' => 1]]);
+    $itemInvoiceServiceMock->shouldNotReceive('executeTask');
+
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldNotReceive('find');
+
+    $connection = Mockery::mock(Doctrine\DBAL\Connection::class);
+    $connection->shouldReceive('transactional')
+        ->once()
+        ->andReturnUsing(fn (callable $func): mixed => $func($connection));
+    $connection->shouldReceive('fetchOne')
+        ->with('SELECT status FROM invoice_item WHERE id = :id FOR UPDATE', ['id' => 1])
+        ->andReturn(InvoiceItem::STATUS_FAILED);
+    $em->shouldReceive('getConnection')->andReturn($connection);
+
+    $di = container();
+    $di['em'] = $em;
+    $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $itemInvoiceServiceMock);
+    $di['logger'] = new Tests\Helpers\TestLogger();
+
+    $service->setDi($di);
+    expect($service->doBatchPaidInvoiceActivation())->toBeTrue();
 });
 
 test('sends reminders in batch at most once per day', function (): void {
@@ -2626,12 +2739,14 @@ test('throws exception when processing invoice with gateway not found', function
     $dbMock->shouldReceive('findOne')
         ->atLeast()->once()
         ->andReturn($invoiceModel);
-    $dbMock->shouldReceive('load')
-        ->atLeast()->once()
-        ->andReturn(null);
+
+    $em = Mockery::mock(EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->with(PayGateway::class)->andReturn($gatewayRepo = Mockery::mock(PayGatewayRepository::class));
+    $gatewayRepo->shouldReceive('find')->atLeast()->once()->with(2)->andReturn(null);
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
 
     $service->setDi($di);
 
@@ -2649,19 +2764,20 @@ test('throws exception when processing invoice with gateway not enabled', functi
     $invoiceModel = new Model_Invoice();
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
 
-    $payGatewayModel = new Model_PayGateway();
-    $payGatewayModel->loadBean(new Tests\Helpers\DummyBean());
+    $payGatewayModel = createEntity(PayGateway::class, ['id' => 2, 'enabled' => false]);
 
     $dbMock = Mockery::mock('\Box_Database');
     $dbMock->shouldReceive('findOne')
         ->atLeast()->once()
         ->andReturn($invoiceModel);
-    $dbMock->shouldReceive('load')
-        ->atLeast()->once()
-        ->andReturn($payGatewayModel);
+
+    $em = Mockery::mock(EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->with(PayGateway::class)->andReturn($gatewayRepo = Mockery::mock(PayGatewayRepository::class));
+    $gatewayRepo->shouldReceive('find')->atLeast()->once()->with(2)->andReturn($payGatewayModel);
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
 
     $service->setDi($di);
 
@@ -2684,17 +2800,16 @@ test('processes an invoice', function (): void {
     $invoiceModel = new Model_Invoice();
     $invoiceModel->loadBean(new Tests\Helpers\DummyBean());
 
-    $payGatewayModel = new Model_PayGateway();
-    $payGatewayModel->loadBean(new Tests\Helpers\DummyBean());
-    $payGatewayModel->enabled = true;
+    $payGatewayModel = createEntity(PayGateway::class, ['id' => 2, 'enabled' => true]);
 
     $dbMock = Mockery::mock('\Box_Database');
     $dbMock->shouldReceive('findOne')
         ->atLeast()->once()
         ->andReturn($invoiceModel);
-    $dbMock->shouldReceive('load')
-        ->atLeast()->once()
-        ->andReturn($payGatewayModel);
+
+    $em = Mockery::mock(EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->with(PayGateway::class)->andReturn($gatewayRepo = Mockery::mock(PayGatewayRepository::class));
+    $gatewayRepo->shouldReceive('find')->atLeast()->once()->with(2)->andReturn($payGatewayModel);
 
     $subscribeService = Mockery::mock(ServiceSubscription::class);
     $subscribeService->shouldReceive('isSubscribable')
@@ -2726,6 +2841,7 @@ test('processes an invoice', function (): void {
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['mod_service'] = $di->protect(function ($serviceName, $sub = '') use ($payGatewayService, $subscribeService) {
         if ($sub == 'PayGateway') {
             return $payGatewayService;
@@ -2907,18 +3023,16 @@ test('checks if invoice type is deposit', function (): void {
     $service = new Service();
     $di = container();
 
-    $modelInvoiceItem = new Model_InvoiceItem();
-    $modelInvoiceItem->loadBean(new Tests\Helpers\DummyBean());
-    $modelInvoiceItem->type = Model_InvoiceItem::TYPE_DEPOSIT;
+    $modelInvoiceItem = createEntity(InvoiceItem::class, ['type' => InvoiceItem::TYPE_DEPOSIT]);
 
     $invoiceItems = [$modelInvoiceItem];
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn($invoiceItems);
 
-    $di['db'] = $dbMock;
+    $di['em'] = $em;
 
     $modelInvoice = new Model_Invoice();
     $modelInvoice->loadBean(new Tests\Helpers\DummyBean());
@@ -2932,18 +3046,16 @@ test('returns false when invoice type is not deposit', function (): void {
     $service = new Service();
     $di = container();
 
-    $modelInvoiceItem = new Model_InvoiceItem();
-    $modelInvoiceItem->loadBean(new Tests\Helpers\DummyBean());
-    $modelInvoiceItem->type = Model_InvoiceItem::TYPE_ORDER;
+    $modelInvoiceItem = createEntity(InvoiceItem::class, ['type' => InvoiceItem::TYPE_ORDER]);
 
     $invoiceItems = [$modelInvoiceItem];
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn($invoiceItems);
 
-    $di['db'] = $dbMock;
+    $di['em'] = $em;
     $service->setDi($di);
 
     $modelInvoice = new Model_Invoice();
@@ -2959,12 +3071,12 @@ test('returns false when checking deposit with empty items', function (): void {
 
     $invoiceItems = [];
 
-    $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->atLeast()->once()
         ->andReturn($invoiceItems);
 
-    $di['db'] = $dbMock;
+    $di['em'] = $em;
     $service->setDi($di);
 
     $modelInvoice = new Model_Invoice();
@@ -3047,32 +3159,30 @@ test('generateRenewalInvoiceForSubscriptionPayment returns null when subscriptio
 test('generateRenewalInvoiceForSubscriptionPayment returns null when original order is not active', function (): void {
     $service = new Service();
 
-    $subscription = new Model_Subscription();
-    $subscription->loadBean(new Tests\Helpers\DummyBean());
-    $subscription->rel_type = 'invoice';
-    $subscription->rel_id = 82;
+    $subscription = createEntity(Subscription::class, ['id' => 7, 'relType' => 'invoice', 'relId' => 82]);
 
-    $invoiceItem = new Model_InvoiceItem();
-    $invoiceItem->loadBean(new Tests\Helpers\DummyBean());
-    $invoiceItem->rel_id = 82;
+    $invoiceItem = createEntity(InvoiceItem::class, ['rel_id' => 82]);
 
     $originalOrder = new Model_ClientOrder();
     $originalOrder->loadBean(new Tests\Helpers\DummyBean());
     $originalOrder->status = Model_ClientOrder::STATUS_PENDING_SETUP;
 
     $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('findOne')
-        ->with('Subscription', 'sid = :sid', Mockery::any())
-        ->andReturn($subscription);
-    $dbMock->shouldReceive('findOne')
-        ->with('InvoiceItem', Mockery::any(), Mockery::any())
-        ->andReturn($invoiceItem);
     $dbMock->shouldReceive('load')
         ->with('ClientOrder', 82)
         ->andReturn($originalOrder);
 
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findOneByInvoiceIdAndType')
+        ->with(82, InvoiceItem::TYPE_ORDER)
+        ->andReturn($invoiceItem);
+    $subscriptionRepo = Mockery::mock(SubscriptionRepository::class);
+    $subscriptionRepo->shouldReceive('findOneBy')->once()->andReturn($subscription);
+    $em->shouldReceive('getRepository')->with(Subscription::class)->andReturn($subscriptionRepo);
+
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['logger'] = new Tests\Helpers\TestLogger();
     $service->setDi($di);
 
@@ -3081,14 +3191,9 @@ test('generateRenewalInvoiceForSubscriptionPayment returns null when original or
 });
 
 test('generateRenewalInvoiceForSubscriptionPayment uses the original order and not a product_id lookup', function (): void {
-    $subscription = new Model_Subscription();
-    $subscription->loadBean(new Tests\Helpers\DummyBean());
-    $subscription->rel_type = 'invoice';
-    $subscription->rel_id = 82;
+    $subscription = createEntity(Subscription::class, ['id' => 7, 'relType' => 'invoice', 'relId' => 82]);
 
-    $invoiceItem = new Model_InvoiceItem();
-    $invoiceItem->loadBean(new Tests\Helpers\DummyBean());
-    $invoiceItem->rel_id = 82;
+    $invoiceItem = createEntity(InvoiceItem::class, ['rel_id' => 82]);
 
     $originalOrder = new Model_ClientOrder();
     $originalOrder->loadBean(new Tests\Helpers\DummyBean());
@@ -3100,15 +3205,17 @@ test('generateRenewalInvoiceForSubscriptionPayment uses the original order and n
     $renewalInvoice->id = 99;
 
     $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('findOne')
-        ->with('Subscription', 'sid = :sid', Mockery::any())
-        ->andReturn($subscription);
-    $dbMock->shouldReceive('findOne')
-        ->with('InvoiceItem', Mockery::any(), Mockery::any())
-        ->andReturn($invoiceItem);
     $dbMock->shouldReceive('load')
         ->with('ClientOrder', 82)
         ->andReturn($originalOrder);
+
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findOneByInvoiceIdAndType')
+        ->with(82, InvoiceItem::TYPE_ORDER)
+        ->andReturn($invoiceItem);
+    $subscriptionRepo = Mockery::mock(SubscriptionRepository::class);
+    $subscriptionRepo->shouldReceive('findOneBy')->once()->andReturn($subscription);
+    $em->shouldReceive('getRepository')->with(Subscription::class)->andReturn($subscriptionRepo);
 
     $serviceMock = Mockery::mock(Service::class)->makePartial();
     $serviceMock->shouldReceive('generateForOrder')
@@ -3120,6 +3227,7 @@ test('generateRenewalInvoiceForSubscriptionPayment uses the original order and n
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['logger'] = new Tests\Helpers\TestLogger();
     $serviceMock->setDi($di);
 
@@ -3139,15 +3247,11 @@ test('markAsPaid transitions a deposit invoice to paid status', function (): voi
     $depositInvoice->approved = true;
     $depositInvoice->currency = 'USD';
 
-    $depositItem = new Model_InvoiceItem();
-    $depositItem->loadBean(new Tests\Helpers\DummyBean());
-    $depositItem->id = 96;
-    $depositItem->type = Model_InvoiceItem::TYPE_DEPOSIT;
-    $depositItem->task = 'void';
+    $depositItem = createEntity(InvoiceItem::class, ['id' => 96, 'type' => InvoiceItem::TYPE_DEPOSIT, 'task' => 'void']);
 
     $dbMock = Mockery::mock('\Box_Database');
-    $dbMock->shouldReceive('find')
-        ->with('InvoiceItem', 'invoice_id = ?', [89])
+    [$em, $invoiceItemRepo] = invoiceItemEmAndRepo();
+    $invoiceItemRepo->shouldReceive('findByInvoiceId')
         ->andReturn([$depositItem]);
     $dbMock->shouldReceive('store')
         ->atLeast()->once();
@@ -3179,6 +3283,7 @@ test('markAsPaid transitions a deposit invoice to paid status', function (): voi
 
     $di = container();
     $di['db'] = $dbMock;
+    $di['em'] = $em;
     $di['logger'] = new Tests\Helpers\TestLogger();
     $productService = Mockery::mock(ProductService::class)->shouldIgnoreMissing();
     $di['mod_service'] = $di->protect(fn ($name, $sub = '') => match ([$name, $sub]) {
@@ -3287,4 +3392,52 @@ test('getInvoicePdfAttachment returns null and logs when PDF generation fails', 
     expect($result)->toBeNull();
     $errors = array_filter($logger->calls, fn ($c): bool => $c['method'] === 'error');
     expect($errors)->not->toBeEmpty();
+});
+
+test('exportCSV strips hash from numeric-array headers', function (): void {
+    $service = new Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    $service->exportCSV(['hash', 'id', 'buyer_email']);
+
+    expect($capturedHeaders)->not->toContain('hash')
+        ->and($capturedHeaders)->toContain('id')
+        ->and($capturedHeaders)->toContain('buyer_email');
+});
+
+test('exportCSV falls back to defaults when only hash is requested', function (): void {
+    $service = new Service();
+
+    $capturedHeaders = null;
+    $factoryMock = Mockery::mock();
+    $factoryMock->shouldReceive('create')
+        ->once()
+        ->andReturnUsing(function (string $table, string $name, array $headers) use (&$capturedHeaders): Symfony\Component\HttpFoundation\Response {
+            $capturedHeaders = $headers;
+
+            return new Symfony\Component\HttpFoundation\Response();
+        });
+
+    $di = container();
+    $di['csv_response_factory'] = $factoryMock;
+    $service->setDi($di);
+
+    $service->exportCSV(['hash']);
+
+    expect($capturedHeaders)->toContain('id')
+        ->and($capturedHeaders)->toContain('buyer_email')
+        ->and($capturedHeaders)->not->toContain('hash');
 });

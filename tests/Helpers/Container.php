@@ -172,32 +172,22 @@ function container(): Container
         $clientQueryBuilder->shouldReceive('getQuery')->byDefault()->andReturn($clientQuery);
 
         $clientRepository = \Mockery::mock(\Box\Mod\Client\Repository\ClientRepository::class)->shouldIgnoreMissing();
-        $clientRepository->shouldReceive('find')->byDefault()->andReturnUsing(static function (int $id): ?object {
-            return createEntity(\Box\Mod\Client\Entity\Client::class, ['id' => $id]);
-        });
+        $clientRepository->shouldReceive('find')->byDefault()->andReturnUsing(static fn (int $id): ?object => createEntity(\Box\Mod\Client\Entity\Client::class, ['id' => $id]));
         $clientRepository->shouldReceive('findOneBy')->byDefault()->andReturn(null);
-        $clientRepository->shouldReceive('findOneByEmail')->byDefault()->andReturnUsing(static function (string $email): ?object {
-            return createEntity(\Box\Mod\Client\Entity\Client::class, ['id' => 1, 'email' => $email]);
-        });
-        $clientRepository->shouldReceive('findOneByEmailAndActive')->byDefault()->andReturnUsing(static function (string $email): ?object {
-            return createEntity(\Box\Mod\Client\Entity\Client::class, ['id' => 1, 'email' => $email, 'status' => 'active']);
-        });
+        $clientRepository->shouldReceive('findOneByEmail')->byDefault()->andReturnUsing(static fn (string $email): ?object => createEntity(\Box\Mod\Client\Entity\Client::class, ['id' => 1, 'email' => $email]));
+        $clientRepository->shouldReceive('findOneByEmailAndActive')->byDefault()->andReturnUsing(static fn (string $email): ?object => createEntity(\Box\Mod\Client\Entity\Client::class, ['id' => 1, 'email' => $email, 'status' => 'active']));
         $clientRepository->shouldReceive('findOneByApiToken')->byDefault()->andReturn(null);
         $clientRepository->shouldReceive('getIdNamePairs')->byDefault()->andReturn([]);
         $clientRepository->shouldReceive('getStatusCounts')->byDefault()->andReturn(['active' => 1, 'suspended' => 0, 'canceled' => 0]);
         $clientRepository->shouldReceive('createQueryBuilder')->byDefault()->andReturn($clientQueryBuilder);
 
         $clientBalanceRepository = \Mockery::mock(\Box\Mod\Client\Repository\ClientBalanceRepository::class)->shouldIgnoreMissing();
-        $clientBalanceRepository->shouldReceive('find')->byDefault()->andReturnUsing(static function (int $id): ?object {
-            return createEntity(\Box\Mod\Client\Entity\ClientBalance::class, ['id' => $id]);
-        });
+        $clientBalanceRepository->shouldReceive('find')->byDefault()->andReturnUsing(static fn (int $id): ?object => createEntity(\Box\Mod\Client\Entity\ClientBalance::class, ['id' => $id]));
         $clientBalanceRepository->shouldReceive('findBy')->byDefault()->andReturn([]);
         $clientBalanceRepository->shouldReceive('getClientBalanceSum')->byDefault()->andReturn(0.0);
 
         $clientGroupRepository = \Mockery::mock(\Box\Mod\Client\Repository\ClientGroupRepository::class)->shouldIgnoreMissing();
-        $clientGroupRepository->shouldReceive('find')->byDefault()->andReturnUsing(static function (int $id): ?object {
-            return createEntity(\Box\Mod\Client\Entity\ClientGroup::class, ['id' => $id]);
-        });
+        $clientGroupRepository->shouldReceive('find')->byDefault()->andReturnUsing(static fn (int $id): ?object => createEntity(\Box\Mod\Client\Entity\ClientGroup::class, ['id' => $id]));
         $clientGroupRepository->shouldReceive('getIdTitlePairs')->byDefault()->andReturn([]);
 
         $clientPasswordResetRepository = \Mockery::mock(\Box\Mod\Client\Repository\ClientPasswordResetRepository::class)->shouldIgnoreMissing();
@@ -236,6 +226,31 @@ function container(): Container
         $supportTicketNoteRepository = \Mockery::mock(\Box\Mod\Support\Repository\SupportTicketNoteRepository::class)->shouldIgnoreMissing();
         $supportTicketMessageHistoryRepository = \Mockery::mock(\Box\Mod\Support\Repository\SupportTicketMessageHistoryRepository::class)->shouldIgnoreMissing();
 
+        $payGatewayRepository = \Mockery::mock(\Box\Mod\Invoice\Repository\PayGatewayRepository::class)->shouldIgnoreMissing();
+        $payGatewayRepository->shouldReceive('find')->byDefault()->andReturn(null);
+        $payGatewayRepository->shouldReceive('findEnabledOrderedByIdDesc')->byDefault()->andReturn([]);
+        $payGatewayRepository->shouldReceive('findEnabledByGateway')->byDefault()->andReturn(null);
+        $payGatewayQueryBuilder = \Mockery::mock(\Doctrine\ORM\QueryBuilder::class)->shouldIgnoreMissing();
+        foreach (['andWhere', 'orWhere', 'setParameter', 'orderBy', 'setFirstResult', 'setMaxResults', 'where'] as $method) {
+            $payGatewayQueryBuilder->shouldReceive($method)->byDefault()->andReturn($payGatewayQueryBuilder);
+        }
+        $payGatewayRepository->shouldReceive('getSearchQueryBuilder')->byDefault()->andReturn($payGatewayQueryBuilder);
+
+        $transactionRepository = \Mockery::mock(\Box\Mod\Invoice\Repository\TransactionRepository::class)->shouldIgnoreMissing();
+        $transactionRepository->shouldReceive('find')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('findOneBy')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('findOneByTxnIdAndGatewayId')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('findOneByGatewayIdAndIpnHash')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('findOneProcessedByTxnId')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('findActiveByTxnIdAndGatewayId')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('findProcessingOrProcessedByTxnId')->byDefault()->andReturn(null);
+        $transactionRepository->shouldReceive('competingTransactionQuery')->byDefault()->andReturn($payGatewayQueryBuilder);
+
+        $subscriptionRepository = \Mockery::mock(\Box\Mod\Invoice\Repository\SubscriptionRepository::class)->shouldIgnoreMissing();
+        $subscriptionRepository->shouldReceive('find')->byDefault()->andReturn(null);
+        $subscriptionRepository->shouldReceive('findOneBy')->byDefault()->andReturn(null);
+        $subscriptionRepository->shouldReceive('findOneBySid')->byDefault()->andReturn(null);
+
         $em = \Mockery::mock(\Doctrine\ORM\EntityManagerInterface::class)->shouldIgnoreMissing();
         $em->shouldReceive('getRepository')->byDefault()->andReturnUsing(static fn (string $class): object => match ($class) {
             \Box\Mod\Client\Entity\Client::class => $clientRepository,
@@ -257,6 +272,9 @@ function container(): Container
             \Box\Mod\Support\Entity\SupportTicketMessage::class => $supportTicketMessageRepository,
             \Box\Mod\Support\Entity\SupportTicketNote::class => $supportTicketNoteRepository,
             \Box\Mod\Support\Entity\SupportTicketMessageHistory::class => $supportTicketMessageHistoryRepository,
+            \Box\Mod\Invoice\Entity\PayGateway::class => $payGatewayRepository,
+            \Box\Mod\Invoice\Entity\Transaction::class => $transactionRepository,
+            \Box\Mod\Invoice\Entity\Subscription::class => $subscriptionRepository,
             \Box\Mod\Extension\Entity\Extension::class => \Mockery::mock(\Box\Mod\Extension\Repository\ExtensionRepository::class)->shouldIgnoreMissing(),
             default => $extensionMetaRepository,
         });

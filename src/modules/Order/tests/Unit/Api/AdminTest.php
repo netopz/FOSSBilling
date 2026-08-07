@@ -156,8 +156,7 @@ test('uses invoice service to validate mark paid request when permission granted
         ->once()
         ->with('invoice', null, null, Mockery::any());
 
-    $payGateway = new Model_PayGateway();
-    $payGateway->loadBean(new Tests\Helpers\DummyBean());
+    $payGateway = new Box\Mod\Invoice\Entity\PayGateway();
 
     $invoiceServiceMock = Mockery::mock(Box\Mod\Invoice\Service::class);
     $invoiceServiceMock->shouldReceive('validateAdminMarkAsPaidRequest')
@@ -518,6 +517,16 @@ test('batch suspends expired orders', function (): void {
     $result = $api->batch_suspend_expired($data);
 
     expect($result)->toBeTrue();
+});
+
+test('batch sends suspension warnings', function (): void {
+    $api = apiEndpoint(new Admin());
+
+    $serviceMock = Mockery::mock(Service::class);
+    $serviceMock->shouldReceive('batchSendSuspensionWarnings')->once()->andReturn(true);
+    $api->setService($serviceMock);
+
+    expect($api->batch_send_suspension_warnings([]))->toBeTrue();
 });
 
 test('batch cancels suspended orders', function (): void {

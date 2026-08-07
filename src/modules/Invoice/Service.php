@@ -11,7 +11,12 @@ declare(strict_types=1);
 
 namespace Box\Mod\Invoice;
 
+use Box\Mod\Client\Entity\ClientBalance;
 use Box\Mod\Currency\Entity\Currency;
+use Box\Mod\Invoice\Entity\InvoiceItem;
+use Box\Mod\Invoice\Entity\PayGateway;
+use Box\Mod\Invoice\Entity\Transaction;
+use Box\Mod\Invoice\Repository\InvoiceItemRepository;
 use Dompdf\Dompdf;
 use Dompdf\Options;
 use FOSSBilling\Environment;
@@ -28,9 +33,36 @@ use Twig\Loader\FilesystemLoader;
 
 class Service implements InjectionAwareInterface
 {
+    /**
+     * Columns on the `invoice` table permitted in CSV exports.
+     * The `hash` column (bearer token for public invoice access) is excluded.
+     */
+    private const array EXPORTABLE_COLUMNS = [
+        'id', 'client_id', 'serie', 'nr', 'currency', 'currency_rate',
+        'credit', 'base_income', 'base_refund', 'refund', 'notes',
+        'text_1', 'text_2', 'status', 'seller_company', 'seller_company_vat',
+        'seller_company_number', 'seller_address', 'seller_phone', 'seller_email',
+        'buyer_first_name', 'buyer_last_name', 'buyer_company', 'buyer_company_vat',
+        'buyer_company_number', 'buyer_address', 'buyer_city', 'buyer_state',
+        'buyer_country', 'buyer_zip', 'buyer_phone', 'buyer_phone_cc',
+        'buyer_email', 'gateway_id', 'approved', 'taxname', 'taxrate',
+        'due_at', 'reminded_at', 'paid_at', 'created_at', 'updated_at',
+    ];
+
+    /** Subset of EXPORTABLE_COLUMNS used when the caller passes no headers. */
+    private const array DEFAULT_EXPORT_COLUMNS = [
+        'id', 'client_id', 'nr', 'currency', 'credit', 'base_income', 'base_refund',
+        'refund', 'notes', 'status', 'buyer_first_name', 'buyer_last_name',
+        'buyer_company', 'buyer_company_vat', 'buyer_company_number', 'buyer_address',
+        'buyer_city', 'buyer_state', 'buyer_country', 'buyer_zip', 'buyer_phone',
+        'buyer_phone_cc', 'buyer_email', 'approved', 'taxname', 'taxrate',
+        'due_at', 'reminded_at', 'paid_at',
+    ];
+
     protected ?\Pimple\Container $di = null;
     private Filesystem $filesystem;
     private ?int $invoiceNumberPadding = null;
+    private ?InvoiceItemRepository $invoiceItemRepository = null;
 
     public function setDi(\Pimple\Container $di): void
     {
@@ -43,6 +75,15 @@ class Service implements InjectionAwareInterface
     public function getDi(): ?\Pimple\Container
     {
         return $this->di;
+    }
+
+    public function getInvoiceItemRepository(): InvoiceItemRepository
+    {
+        if ($this->invoiceItemRepository === null) {
+            $this->invoiceItemRepository = $this->di['em']->getRepository(InvoiceItem::class);
+        }
+
+        return $this->invoiceItemRepository;
     }
 
     public function getModulePermissions(): array
@@ -127,7 +168,7 @@ class Service implements InjectionAwareInterface
 
         if ($order_id) {
             $sql .= ' AND pi.type = :item_type AND pi.rel_id = :order_id';
-            $params['item_type'] = \Model_InvoiceItem::TYPE_ORDER;
+            $params['item_type'] = InvoiceItem::TYPE_ORDER;
             $params['order_id'] = $order_id;
         }
 
@@ -254,37 +295,37 @@ class Service implements InjectionAwareInterface
         $this->ensureValidHash($invoice);
         $row = $this->di['db']->toArray($invoice);
 
-        $items = $this->di['db']->find('InvoiceItem', 'invoice_id = :iid', ['iid' => $row['id']]);
+        $items = $this->getInvoiceItemRepository()->findByInvoiceId((int) $row['id']);
         $lines = [];
         $total = 0;
         $taxable_subtotal = 0;
 
         foreach ($items as $item) {
-            $order_id = ($item->type == \Model_InvoiceItem::TYPE_ORDER) ? $item->rel_id : null;
+            $order_id = ($item->getType() == InvoiceItem::TYPE_ORDER) ? $item->getRelId() : null;
 
-            $line_total = ($item->price ?? 0) * ($item->quantity ?? 1);
+            $line_total = ($item->getPrice() ?? 0) * ($item->getQuantity() ?? 1);
             $total += $line_total;
 
-            if ($item->taxed) {
+            if ($item->getTaxed()) {
                 $taxable_subtotal += $line_total;
             }
 
             $line = [
-                'id' => $item->id,
-                'title' => $item->title,
-                'period' => $item->period,
-                'quantity' => $item->quantity ?? 1,
-                'unit' => $item->unit,
-                'price' => $item->price ?? 0,
+                'id' => $item->getId(),
+                'title' => $item->getTitle(),
+                'period' => $item->getPeriod(),
+                'quantity' => $item->getQuantity() ?? 1,
+                'unit' => $item->getUnit(),
+                'price' => $item->getPrice() ?? 0,
                 'tax' => 0, // Tax will be calculated on the total taxable subtotal
-                'taxed' => $item->taxed,
-                'charged' => $item->charged,
+                'taxed' => (int) $item->getTaxed(),
+                'charged' => (int) $item->getCharged(),
                 'total' => $line_total,
                 'order_id' => $order_id,
-                'type' => $item->type,
-                'rel_id' => $item->rel_id,
-                'task' => $item->task,
-                'status' => $item->status,
+                'type' => $item->getType(),
+                'rel_id' => $item->getRelId(),
+                'task' => $item->getTask(),
+                'status' => $item->getStatus(),
             ];
             $lines[] = $line;
         }
@@ -690,7 +731,7 @@ class Service implements InjectionAwareInterface
             return true;
         }
 
-        $invoiceItems = $this->di['db']->find('InvoiceItem', 'invoice_id = ?', [$invoice->id]);
+        $invoiceItems = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->id);
         $invoiceItemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
         foreach ($invoiceItems as $item) {
             $invoiceItemService->markAsPaid($item, $charge);
@@ -747,13 +788,13 @@ class Service implements InjectionAwareInterface
         $payGateway = $this->validateAdminMarkAsPaidRequest($data, $invoice);
         $transactionId = isset($data['transactionId']) ? trim((string) $data['transactionId']) : null;
 
-        if ((int) $payGateway->id !== (int) $invoice->gateway_id) {
-            $invoice->gateway_id = (int) $payGateway->id;
+        if ((int) $payGateway->getId() !== (int) $invoice->gateway_id) {
+            $invoice->gateway_id = (int) $payGateway->getId();
             $invoice->updated_at = date('Y-m-d H:i:s');
             $this->di['db']->store($invoice);
         }
 
-        if (($payGateway->gateway ?? null) === 'Custom' && (int) ($payGateway->enabled ?? 0) === 1) {
+        if ($payGateway->getGateway() === 'Custom' && $payGateway->isEnabled()) {
             $transactionService = $this->di['mod_service']('Invoice', 'Transaction');
             $invoiceTotal = $this->getTotalWithTax($invoice);
             $newtx = $transactionService->create([
@@ -768,20 +809,23 @@ class Service implements InjectionAwareInterface
                 ],
                 'txn_id' => $transactionId,
             ]);
-            $transaction = $this->di['db']->getExistingModelById('Transaction', $newtx, 'Transaction not found');
-            if ((int) $transaction->invoice_id !== (int) $invoice->id) {
+            $transaction = $this->di['em']->getRepository(Transaction::class)->find((int) $newtx);
+            if ($transaction === null) {
+                throw new InformationException('Transaction not found');
+            }
+            if ((int) $transaction->getInvoiceId() !== (int) $invoice->id) {
                 throw new InformationException('Transaction ID is already associated with another invoice.');
             }
 
             $result = $this->markAsPaid($invoice, false, $execute);
             if ($result) {
-                $transaction->amount = $invoiceTotal;
-                $transaction->currency = $invoice->currency;
-                $transaction->status = \Model_Transaction::STATUS_PROCESSED;
-                $gatewayTitle = $payGateway->title ?: $payGateway->gateway;
-                $transaction->note = sprintf('%s transaction No: %s', $gatewayTitle, $transactionId);
-                $transaction->updated_at = date('Y-m-d H:i:s');
-                $this->di['db']->store($transaction);
+                $transaction->setAmount((string) $invoiceTotal);
+                $transaction->setCurrency($invoice->currency);
+                $transaction->setStatus(Transaction::STATUS_PROCESSED);
+                $gatewayTitle = $payGateway->getName() ?: $payGateway->getGateway();
+                $transaction->setNote(sprintf('%s transaction No: %s', $gatewayTitle, $transactionId));
+                $transaction->setUpdatedAt(new \DateTime());
+                $this->di['em']->flush();
             }
 
             return $result;
@@ -790,15 +834,18 @@ class Service implements InjectionAwareInterface
         return $this->markAsPaid($invoice, false, $execute);
     }
 
-    public function validateAdminMarkAsPaidRequest(array $data, ?\Model_Invoice $invoice = null): \Model_PayGateway
+    public function validateAdminMarkAsPaidRequest(array $data, ?\Model_Invoice $invoice = null): PayGateway
     {
         $gatewayId = isset($data['gateway_id']) && !empty($data['gateway_id']) ? (int) $data['gateway_id'] : (int) ($invoice->gateway_id ?? 0);
         if ($gatewayId <= 0) {
             throw new InformationException('Payment gateway is required when marking an invoice as paid.');
         }
 
-        $payGateway = $this->di['db']->getExistingModelById('PayGateway', $gatewayId, 'Payment gateway not found');
-        if (($payGateway->gateway ?? null) === 'Custom' && (int) ($payGateway->enabled ?? 0) === 1) {
+        $payGateway = $this->di['em']->getRepository(PayGateway::class)->find($gatewayId);
+        if ($payGateway === null) {
+            throw new InformationException('Payment gateway not found');
+        }
+        if ($payGateway->getGateway() === 'Custom' && $payGateway->isEnabled()) {
             $transactionId = trim((string) ($data['transactionId'] ?? ''));
             if ($transactionId === '') {
                 throw new InformationException('Transaction ID is required when using the Custom payment gateway.');
@@ -1038,18 +1085,17 @@ class Service implements InjectionAwareInterface
                 return true;
             }
 
-            $balanceTransaction = $this->di['db']->dispense('ClientBalance');
-            $balanceTransaction->client_id = $client->id;
-            $balanceTransaction->type = 'invoice';
-            $balanceTransaction->rel_id = $invoice->id;
+            $balanceTransaction = new ClientBalance();
+            $balanceTransaction->setClientId((int) $client->id);
+            $balanceTransaction->setType('invoice');
+            $balanceTransaction->setRelId((string) $invoice->id);
 
             $invoice_identifier = $invoice->nr ?: $invoice->id;
-            $balanceTransaction->description = "Payment for invoice #{$invoice_identifier} using account credit.";
+            $balanceTransaction->setDescription("Payment for invoice #{$invoice_identifier} using account credit.");
 
-            $balanceTransaction->amount = -$required;
-            $balanceTransaction->created_at = date('Y-m-d H:i:s');
-            $balanceTransaction->updated_at = date('Y-m-d H:i:s');
-            $this->di['db']->store($balanceTransaction);
+            $balanceTransaction->setAmount((string) (-$required));
+            $this->di['em']->persist($balanceTransaction);
+            $this->di['em']->flush();
 
             $this->markAsPaid($invoice, false, true);
 
@@ -1074,7 +1120,7 @@ class Service implements InjectionAwareInterface
             return 0.0;
         }
 
-        $items = $this->di['db']->find('InvoiceItem', 'invoice_id = :iid', [':iid' => $invoice->id]);
+        $items = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->id);
 
         if (empty($items)) {
             return 0.0;
@@ -1082,8 +1128,8 @@ class Service implements InjectionAwareInterface
 
         $taxable_subtotal = 0.0;
         foreach ($items as $item) {
-            if ($item->taxed) {
-                $taxable_subtotal += ($item->price * $item->quantity);
+            if ($item->getTaxed()) {
+                $taxable_subtotal += (($item->getPrice() ?? 0) * ($item->getQuantity() ?? 1));
             }
         }
 
@@ -1097,7 +1143,7 @@ class Service implements InjectionAwareInterface
     public function getTotal(\Model_Invoice $invoice): float
     {
         $total = 0;
-        $invoiceItems = $this->di['db']->find('InvoiceItem', 'invoice_id = ?', [$invoice->id]) ?? [];
+        $invoiceItems = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->id);
         $invoiceItemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
         foreach ($invoiceItems as $item) {
             $total += $invoiceItemService->getTotal($item);
@@ -1153,25 +1199,25 @@ class Service implements InjectionAwareInterface
                 $new->updated_at = date('Y-m-d H:i:s');
                 $this->di['db']->store($new);
 
-                $invoiceItems = $this->di['db']->find('InvoiceItem', 'invoice_id = ?', [$invoice->id]);
+                $invoiceItems = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->id);
+                $entityManager = $this->di['em'];
                 foreach ($invoiceItems as $item) {
-                    $pi = $this->di['db']->dispense('InvoiceItem');
-                    $pi->invoice_id = $new->id;
-                    $pi->type = $item->type;
-                    $pi->rel_id = $item->rel_id;
-                    $pi->task = $item->task;
-                    $pi->status = \Model_InvoiceItem::STATUS_EXECUTED; // Mark refund invoice as executed
-                    $pi->title = $item->title;
-                    $pi->period = $item->period;
-                    $pi->quantity = $item->quantity;
-                    $pi->unit = $item->unit;
-                    $pi->charged = 1;
-                    $pi->price = -$item->price;
-                    $pi->taxed = $item->taxed;
-                    $pi->created_at = date('Y-m-d H:i:s');
-                    $pi->updated_at = date('Y-m-d H:i:s');
-                    $this->di['db']->store($pi);
+                    $pi = new InvoiceItem();
+                    $pi->setInvoiceId($new->id);
+                    $pi->setType($item->getType());
+                    $pi->setRelId($item->getRelId());
+                    $pi->setTask($item->getTask());
+                    $pi->setStatus(InvoiceItem::STATUS_EXECUTED); // Mark refund invoice as executed
+                    $pi->setTitle($item->getTitle());
+                    $pi->setPeriod($item->getPeriod());
+                    $pi->setQuantity($item->getQuantity());
+                    $pi->setUnit($item->getUnit());
+                    $pi->setCharged(1);
+                    $pi->setPrice(-($item->getPrice() ?? 0));
+                    $pi->setTaxed($item->getTaxed());
+                    $entityManager->persist($pi);
                 }
+                $entityManager->flush();
 
                 $this->countIncome($new);
 
@@ -1225,11 +1271,11 @@ class Service implements InjectionAwareInterface
         $this->di['events_manager']->fire(['event' => 'onBeforeAdminInvoiceUpdate', 'params' => $data]);
 
         if (!empty($data['gateway_id'])) {
-            $gateway = $this->di['db']->load('PayGateway', $data['gateway_id']);
-            if (!$gateway instanceof \Model_PayGateway) {
+            $gateway = $this->di['em']->getRepository(PayGateway::class)->find((int) $data['gateway_id']);
+            if (!$gateway instanceof PayGateway) {
                 throw new InformationException('Payment gateway not found');
             }
-            if (!$gateway->enabled) {
+            if (!$gateway->isEnabled()) {
                 throw new InformationException('Payment gateway is not enabled');
             }
             $model->gateway_id = intval($data['gateway_id']);
@@ -1291,8 +1337,8 @@ class Service implements InjectionAwareInterface
 
         $items = $data['items'] ?? [];
         foreach ($items as $id => $d) {
-            $item = $this->di['db']->load('InvoiceItem', $id);
-            if ($item instanceof \Model_InvoiceItem) {
+            $item = $this->getInvoiceItemRepository()->find((int) $id);
+            if ($item instanceof InvoiceItem) {
                 $invoiceItemService->update($item, $d);
             }
         }
@@ -1325,10 +1371,12 @@ class Service implements InjectionAwareInterface
             WHERE unpaid_invoice_id = :id';
         $this->di['db']->exec($sql, ['id' => $model->id]);
 
-        $invoiceItems = $this->di['db']->find('InvoiceItem', 'invoice_id = ?', [$model->id]);
+        $invoiceItems = $this->getInvoiceItemRepository()->findByInvoiceId((int) $model->id);
+        $entityManager = $this->di['em'];
         foreach ($invoiceItems as $item) {
-            $this->di['db']->trash($item);
+            $entityManager->remove($item);
         }
+        $entityManager->flush();
         $this->di['db']->trash($model);
 
         return true;
@@ -1462,7 +1510,7 @@ class Service implements InjectionAwareInterface
         $this->setInvoiceDefaults($proforma);
 
         $invoiceItemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
-        $invoiceItemService->generateFromOrder($proforma, $order, \Model_InvoiceItem::TASK_RENEW, $price, $line);
+        $invoiceItemService->generateFromOrder($proforma, $order, InvoiceItem::TASK_RENEW, $price, $line);
 
         // invoice due date
         if ($due_days > 0) {
@@ -1505,11 +1553,28 @@ class Service implements InjectionAwareInterface
         $invoiceItemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
 
         $invoiceItems = (array) $invoiceItemService->getAllNotExecutePaidItems();
+        $connection = $this->di['em']->getConnection();
         foreach ($invoiceItems as $item) {
             try {
-                $model = $this->di['db']->getExistingModelById('InvoiceItem', $item['id'] ?? 0);
-                $invoiceItemService->executeTask($model);
+                $connection->transactional(function () use ($connection, $item, $invoiceItemService): void {
+                    // Claim the row so concurrent cron processes cannot execute the same item twice.
+                    $status = $connection->fetchOne(
+                        'SELECT status FROM invoice_item WHERE id = :id FOR UPDATE',
+                        ['id' => (int) ($item['id'] ?? 0)]
+                    );
+                    if (in_array($status, [InvoiceItem::STATUS_EXECUTED, InvoiceItem::STATUS_FAILED], true)) {
+                        return;
+                    }
+
+                    $model = $this->getInvoiceItemRepository()->find((int) ($item['id'] ?? 0));
+                    if (!$model instanceof InvoiceItem) {
+                        throw new InformationException('Invoice item was not found');
+                    }
+                    $invoiceItemService->executeTask($model);
+                });
             } catch (\Exception $e) {
+                // Clear the identity map so subsequent iterations work with fresh, database-consistent entities.
+                $this->di['em']->clear();
                 $this->di['logger']->error($e->getMessage());
             }
         }
@@ -1678,12 +1743,12 @@ class Service implements InjectionAwareInterface
 
         $this->checkInvoiceAuth($invoice, InvoiceOperation::PAYMENT);
 
-        $gtw = $this->di['db']->load('PayGateway', $data['gateway_id']);
-        if (!$gtw instanceof \Model_PayGateway) {
+        $gtw = $this->di['em']->getRepository(PayGateway::class)->find((int) $data['gateway_id']);
+        if (!$gtw instanceof PayGateway) {
             throw new InformationException('Payment method not found', null, 813);
         }
 
-        if (!$gtw->enabled) {
+        if (!$gtw->isEnabled()) {
             throw new \FOSSBilling\Exception('Payment method not enabled', null, 814);
         }
 
@@ -1724,7 +1789,7 @@ class Service implements InjectionAwareInterface
         $i = clone $invoice;
         $mpi = $this->getPaymentInvoice($i, $subscribe);
         $r = ($subscribe) ? $adapter->recurrentPayment($mpi) : $adapter->singlePayment($mpi);
-        $this->di['logger']->info('Went to pay for invoice #%s via %s', $invoice->id, $gtw->gateway);
+        $this->di['logger']->info('Went to pay for invoice #%s via %s', $invoice->id, $gtw->getGateway());
 
         // @bug https://github.com/boxbilling/boxbilling/issues/108
         if ($adapter->getType() != 'html') {
@@ -1959,7 +2024,7 @@ class Service implements InjectionAwareInterface
                     AND m.approved = 1
                     AND cb.amount >= pi.price
                     AND pi.type != :type';
-        $params = ['status' => \Model_Invoice::STATUS_UNPAID, 'type' => \Model_InvoiceItem::TYPE_DEPOSIT];
+        $params = ['status' => \Model_Invoice::STATUS_UNPAID, 'type' => InvoiceItem::TYPE_DEPOSIT];
 
         $client_id = isset($filter['client_id']) ? (int) $filter['client_id'] : null;
 
@@ -2145,10 +2210,10 @@ class Service implements InjectionAwareInterface
 
     public function isInvoiceTypeDeposit(\Model_Invoice $invoice): bool
     {
-        $invoiceItems = $this->di['db']->find('InvoiceItem', 'invoice_id = ?', [$invoice->id]);
+        $invoiceItems = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->id);
 
         foreach ($invoiceItems as $item) {
-            if ($item->type == \Model_InvoiceItem::TYPE_DEPOSIT) {
+            if ($item->getType() == InvoiceItem::TYPE_DEPOSIT) {
                 return true;
             }
         }
@@ -2158,8 +2223,12 @@ class Service implements InjectionAwareInterface
 
     public function exportCSV(array $headers): Response
     {
+        if ($headers) {
+            $headers = array_values(array_intersect(self::EXPORTABLE_COLUMNS, $headers));
+        }
+
         if (!$headers) {
-            $headers = ['id', 'client_id', 'nr', 'currency', 'credit', 'base_income', 'base_refund', 'refund', 'notes', 'status', 'buyer_first_name', 'buyer_last_name', 'buyer_company', 'buyer_company_vat', 'buyer_company_number', 'buyer_address', 'buyer_city', 'buyer_state', 'buyer_country', 'buyer_zip', 'buyer_phone', 'buyer_phone_cc', 'buyer_email', 'approved', 'taxname', 'taxrate', 'due_at', 'reminded_at', 'paid_at'];
+            $headers = self::DEFAULT_EXPORT_COLUMNS;
         }
 
         return $this->di['csv_response_factory']->create('invoice', 'invoices.csv', $headers);
@@ -2456,14 +2525,10 @@ class Service implements InjectionAwareInterface
      */
     public function getOrderIdFromInvoice(int $invoiceId): ?int
     {
-        $item = $this->di['db']->findOne(
-            'InvoiceItem',
-            'invoice_id = :invoice_id AND type = :type',
-            ['invoice_id' => $invoiceId, 'type' => \Model_InvoiceItem::TYPE_ORDER]
-        );
+        $item = $this->getInvoiceItemRepository()->findOneByInvoiceIdAndType($invoiceId, InvoiceItem::TYPE_ORDER);
 
-        if ($item instanceof \Model_InvoiceItem) {
-            return (int) $item->rel_id;
+        if ($item instanceof InvoiceItem) {
+            return (int) $item->getRelId();
         }
 
         return null;
@@ -2485,16 +2550,16 @@ class Service implements InjectionAwareInterface
         $orderService = $this->di['mod_service']('Order');
 
         try {
-            $subscription = $this->di['db']->findOne('Subscription', 'sid = :sid', ['sid' => $subscriptionSid]);
-            if (!$subscription instanceof \Model_Subscription) {
+            $subscription = $this->di['em']->getRepository(Entity\Subscription::class)->findOneBy(['sid' => $subscriptionSid]);
+            if (!$subscription instanceof Entity\Subscription) {
                 return null;
             }
 
-            if ($subscription->rel_type !== 'invoice') {
+            if ($subscription->getRelType() !== 'invoice') {
                 return null;
             }
 
-            $originalOrderId = $this->getOrderIdFromInvoice((int) $subscription->rel_id);
+            $originalOrderId = $this->getOrderIdFromInvoice((int) $subscription->getRelId());
             if ($originalOrderId === null) {
                 return null;
             }

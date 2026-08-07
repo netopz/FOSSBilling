@@ -19,6 +19,73 @@ test('downloadable file migration follows the client balance gateway repair', fu
         ->and($patches[93][1])->toBe('patch93');
 });
 
+test('manual currency rate patch follows the currency formatting patch', function (): void {
+    $patches = (new ReflectionMethod(UpdatePatcher::class, 'getPatches'))->invoke(new UpdatePatcher(), 93);
+
+    expect($patches)->toHaveKey(94)
+        ->and($patches[94][1])->toBe('patch94');
+});
+
+test('suspension grace patch follows the manual currency rate patch', function (): void {
+    $patches = (new ReflectionMethod(UpdatePatcher::class, 'getPatches'))->invoke(new UpdatePatcher(), 94);
+
+    expect($patches)->toHaveKey(95)
+        ->and($patches[95][1])->toBe('patch95');
+});
+
+test('client balance unique credit patch follows the suspension grace patch', function (): void {
+    $patches = (new ReflectionMethod(UpdatePatcher::class, 'getPatches'))->invoke(new UpdatePatcher(), 95);
+
+    expect($patches)->toHaveKey(96)
+        ->and($patches[96][1])->toBe('patch96');
+});
+
+test('invoice item attempts patch follows the client balance credit patch', function (): void {
+    $patches = (new ReflectionMethod(UpdatePatcher::class, 'getPatches'))->invoke(new UpdatePatcher(), 96);
+
+    expect($patches)->toHaveKey(97)
+        ->and($patches[97][1])->toBe('patch97');
+});
+
+test('invoice item attempts patch adds the column for existing installs', function (): void {
+    $columns = Mockery::mock(PDOStatement::class);
+    $columns->expects('execute')->with([])->andReturnTrue();
+    $columns->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([]);
+
+    $addColumn = Mockery::mock(PDOStatement::class);
+    $addColumn->expects('execute')->with([])->andReturnTrue();
+
+    $pdo = Mockery::mock(PDO::class);
+    $pdo->expects('prepare')->with('SHOW COLUMNS FROM `invoice_item`')->andReturn($columns);
+    $pdo->expects('prepare')
+        ->with('ALTER TABLE `invoice_item` ADD COLUMN `attempts` INT NOT NULL DEFAULT \'0\' AFTER `taxed`')
+        ->andReturn($addColumn);
+
+    $di = new Pimple\Container();
+    $di['pdo'] = $pdo;
+
+    $patcher = new UpdatePatcher();
+    $patcher->setDi($di);
+    (new ReflectionMethod($patcher, 'patch97'))->invoke($patcher);
+});
+
+test('invoice item attempts patch is a no-op when the column already exists', function (): void {
+    $columns = Mockery::mock(PDOStatement::class);
+    $columns->expects('execute')->with([])->andReturnTrue();
+    $columns->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([['Field' => 'attempts']]);
+
+    $pdo = Mockery::mock(PDO::class);
+    $pdo->expects('prepare')->with('SHOW COLUMNS FROM `invoice_item`')->andReturn($columns);
+    $pdo->shouldNotReceive('prepare')->with('ALTER TABLE `invoice_item` ADD COLUMN `attempts` INT NOT NULL DEFAULT \'0\' AFTER `taxed`');
+
+    $di = new Pimple\Container();
+    $di['pdo'] = $pdo;
+
+    $patcher = new UpdatePatcher();
+    $patcher->setDi($di);
+    (new ReflectionMethod($patcher, 'patch97'))->invoke($patcher);
+});
+
 test('fresh installs start at the latest patch level', function (): void {
     $content = file_get_contents(Path::join(PATH_ROOT, 'install', 'sql', 'content.sql'));
     expect($content)->toBeString();
@@ -26,6 +93,90 @@ test('fresh installs start at the latest patch level', function (): void {
     preg_match("/\\(1,'last_patch','(\\d+)'/", $content, $matches);
 
     expect((int) ($matches[1] ?? 0))->toBe((new UpdatePatcher())->latestPatchLevel());
+});
+
+test('fresh installs index order suspension candidates', function (): void {
+    $filesystem = new Filesystem();
+    $structure = $filesystem->readFile(Path::join(PATH_ROOT, 'install', 'sql', 'structure.sql'));
+
+    expect($structure)->toContain('KEY `client_order_status_expires_at_idx` (`status`, `expires_at`)');
+});
+
+test('fresh installs constrain client balance to one credit per invoice item', function (): void {
+    $filesystem = new Filesystem();
+    $structure = $filesystem->readFile(Path::join(PATH_ROOT, 'install', 'sql', 'structure.sql'));
+
+    expect($structure)->toContain('`invoice_item_id` bigint(20) DEFAULT NULL')
+        ->and($structure)->toContain('UNIQUE KEY `uniq_invoice_item_credit` (`invoice_item_id`)');
+});
+
+test('client balance unique credit patch adds column and index for existing installs', function (): void {
+    $balanceColumns = Mockery::mock(PDOStatement::class);
+    $balanceColumns->expects('execute')->with([])->andReturnTrue();
+    $balanceColumns->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([]);
+
+    $balanceIndexes = Mockery::mock(PDOStatement::class);
+    $balanceIndexes->expects('execute')->with([])->andReturnTrue();
+    $balanceIndexes->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([]);
+
+    $addColumn = Mockery::mock(PDOStatement::class);
+    $addColumn->expects('execute')->with([])->andReturnTrue();
+
+    $addIndex = Mockery::mock(PDOStatement::class);
+    $addIndex->expects('execute')->with([])->andReturnTrue();
+
+    $pdo = Mockery::mock(PDO::class);
+    $pdo->expects('prepare')->with('SHOW COLUMNS FROM `client_balance`')->andReturn($balanceColumns);
+    $pdo->expects('prepare')->with('SHOW INDEX FROM `client_balance`')->andReturn($balanceIndexes);
+    $pdo->expects('prepare')
+        ->with('ALTER TABLE `client_balance` ADD COLUMN `invoice_item_id` BIGINT DEFAULT NULL AFTER `rel_id`')
+        ->andReturn($addColumn);
+    $pdo->expects('prepare')
+        ->with('ALTER TABLE `client_balance` ADD UNIQUE INDEX `uniq_invoice_item_credit` (`invoice_item_id`)')
+        ->andReturn($addIndex);
+
+    $di = new Pimple\Container();
+    $di['pdo'] = $pdo;
+
+    $patcher = new UpdatePatcher();
+    $patcher->setDi($di);
+    (new ReflectionMethod($patcher, 'patch96'))->invoke($patcher);
+});
+
+test('suspension grace patch indexes existing order tables', function (): void {
+    $productColumns = Mockery::mock(PDOStatement::class);
+    $productColumns->expects('execute')->with([])->andReturnTrue();
+    $productColumns->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([
+        ['Field' => 'suspension_grace_days'],
+    ]);
+
+    $orderColumns = Mockery::mock(PDOStatement::class);
+    $orderColumns->expects('execute')->with([])->andReturnTrue();
+    $orderColumns->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([
+        ['Field' => 'suspension_grace_days'],
+    ]);
+
+    $orderIndexes = Mockery::mock(PDOStatement::class);
+    $orderIndexes->expects('execute')->with([])->andReturnTrue();
+    $orderIndexes->expects('fetchAll')->with(PDO::FETCH_ASSOC)->andReturn([]);
+
+    $addIndex = Mockery::mock(PDOStatement::class);
+    $addIndex->expects('execute')->with([])->andReturnTrue();
+
+    $pdo = Mockery::mock(PDO::class);
+    $pdo->expects('prepare')->with('SHOW COLUMNS FROM `product`')->andReturn($productColumns);
+    $pdo->expects('prepare')->with('SHOW COLUMNS FROM `client_order`')->andReturn($orderColumns);
+    $pdo->expects('prepare')->with('SHOW INDEX FROM `client_order`')->andReturn($orderIndexes);
+    $pdo->expects('prepare')
+        ->with('ALTER TABLE `client_order` ADD INDEX `client_order_status_expires_at_idx` (`status`, `expires_at`)')
+        ->andReturn($addIndex);
+
+    $di = new Pimple\Container();
+    $di['pdo'] = $pdo;
+
+    $patcher = new UpdatePatcher();
+    $patcher->setDi($di);
+    (new ReflectionMethod($patcher, 'patch95'))->invoke($patcher);
 });
 
 test('client balance gateway patch restores one-time payments', function (): void {

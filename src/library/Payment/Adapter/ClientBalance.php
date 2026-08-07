@@ -8,6 +8,9 @@ declare(strict_types=1);
  * @copyright FOSSBilling (https://www.fossbilling.org)
  * @license http://www.apache.org/licenses/LICENSE-2.0 Apache-2.0
  */
+
+use Box\Mod\Invoice\Entity\PayGateway;
+
 class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterface
 {
     protected ?Pimple\Container $di = null;
@@ -90,10 +93,10 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
             throw new Payment_Exception('IPN is invalid');
         }
 
-        $tx = $this->di['db']->load('Transaction', $id);
+        $tx = $this->di['em']->getRepository(Box\Mod\Invoice\Entity\Transaction::class)->find((int) $id);
 
-        if ($tx->invoice_id) {
-            $invoice_id = $tx->invoice_id;
+        if ($tx?->getInvoiceId()) {
+            $invoice_id = $tx->getInvoiceId();
         } else {
             $invoice_id = $data['get']['invoice_id'] ?? 0;
         }
@@ -121,11 +124,13 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
         }
         $invoiceService->doBatchPayWithCredits(['client_id' => $invoiceModel->client_id]);
 
-        $tx->error = '';
-        $tx->error_code = null;
-        $tx->status = 'processed';
-        $tx->updated_at = date('Y-m-d H:i:s');
-        $this->di['db']->store($tx);
+        if ($tx instanceof Box\Mod\Invoice\Entity\Transaction) {
+            $tx->setError('');
+            $tx->setErrorCode(null);
+            $tx->setStatus(Box\Mod\Invoice\Entity\Transaction::STATUS_PROCESSED);
+            $tx->setUpdatedAt(new DateTime());
+            $this->di['em']->flush();
+        }
 
         return true;
     }
@@ -137,8 +142,8 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
 
     public function getServiceUrl($invoice_id = 0)
     {
-        $gatewayModel = $this->di['db']->findOne('PayGateway', 'gateway = ? and enabled = 1', ['ClientBalance']);
-        if (!$gatewayModel instanceof Model_PayGateway) {
+        $gatewayModel = $this->di['em']->getRepository(PayGateway::class)->findEnabledByGateway('ClientBalance');
+        if (!$gatewayModel instanceof PayGateway) {
             throw new Payment_Exception('ClientBalance gateway is not enabled', null, 301);
         }
 

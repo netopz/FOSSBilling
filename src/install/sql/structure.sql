@@ -293,11 +293,13 @@ CREATE TABLE `client_balance` (
   `client_id` bigint(20) DEFAULT NULL,
   `type` varchar(100) DEFAULT NULL,
   `rel_id` varchar(20) DEFAULT NULL,
+  `invoice_item_id` bigint(20) DEFAULT NULL,
   `amount` decimal(18,2) DEFAULT '0.00',
   `description` text,
   `created_at` datetime DEFAULT NULL,
   `updated_at` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_invoice_item_credit` (`invoice_item_id`),
   KEY `client_id_idx` (`client_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -348,6 +350,7 @@ CREATE TABLE `client_order` (
   `reason` varchar(255) DEFAULT NULL COMMENT 'suspend/cancel reason',
   `notes` text,
   `config` text,
+  `suspension_grace_days` int(11) DEFAULT NULL,
   `referred_by` varchar(255) DEFAULT NULL,
   `expires_at` datetime DEFAULT NULL,
   `activated_at` datetime DEFAULT NULL,
@@ -360,7 +363,8 @@ CREATE TABLE `client_order` (
   KEY `client_id_idx` (`client_id`),
   KEY `product_id_idx` (`product_id`),
   KEY `form_id_idx` (`form_id`),
-  KEY `promo_id_idx` (`promo_id`)
+  KEY `promo_id_idx` (`promo_id`),
+  KEY `client_order_status_expires_at_idx` (`status`, `expires_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -429,6 +433,7 @@ CREATE TABLE `currency` (
   `code` varchar(3) DEFAULT NULL,
   `is_default` tinyint(1) DEFAULT '0',
   `conversion_rate` decimal(13,6) DEFAULT '1.000000',
+  `is_rate_manual` tinyint(1) DEFAULT '0',
   `format_pattern` varchar(100) DEFAULT NULL,
   `fraction_digits` smallint DEFAULT NULL,
   `created_at` datetime DEFAULT NULL,
@@ -646,6 +651,7 @@ CREATE TABLE `invoice_item` (
   `price` double(18,2) DEFAULT NULL,
   `charged` tinyint(1) DEFAULT '0',
   `taxed` tinyint(1) DEFAULT '0',
+  `attempts` int(11) NOT NULL DEFAULT '0',
   `created_at` datetime DEFAULT NULL,
   `updated_at` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
@@ -815,6 +821,7 @@ CREATE TABLE `product` (
   `allow_quantity_select` tinyint(1) DEFAULT '0',
   `stock_control` tinyint(1) DEFAULT '0',
   `quantity_in_stock` int(11) DEFAULT '0',
+  `suspension_grace_days` int(11) NOT NULL DEFAULT '0',
   `plugin` varchar(255) DEFAULT NULL,
   `plugin_config` text,
   `upgrades` text,
@@ -860,28 +867,26 @@ CREATE TABLE `product_payment` (
   `type` varchar(30) DEFAULT NULL COMMENT 'free, once, recurrent',
   `once_price` decimal(18,2) DEFAULT '0.00',
   `once_setup_price` decimal(18,2) DEFAULT '0.00',
-  `w_price` decimal(18,2) DEFAULT '0.00',
-  `m_price` decimal(18,2) DEFAULT '0.00',
-  `q_price` decimal(18,2) DEFAULT '0.00',
-  `b_price` decimal(18,2) DEFAULT '0.00',
-  `a_price` decimal(18,2) DEFAULT '0.00',
-  `bia_price` decimal(18,2) DEFAULT '0.00',
-  `tria_price` decimal(18,2) DEFAULT '0.00',
-  `w_setup_price` decimal(18,2) DEFAULT '0.00',
-  `m_setup_price` decimal(18,2) DEFAULT '0.00',
-  `q_setup_price` decimal(18,2) DEFAULT '0.00',
-  `b_setup_price` decimal(18,2) DEFAULT '0.00',
-  `a_setup_price` decimal(18,2) DEFAULT '0.00',
-  `bia_setup_price` decimal(18,2) DEFAULT '0.00',
-  `tria_setup_price` decimal(18,2) DEFAULT '0.00',
-  `w_enabled` tinyint(1) DEFAULT '1',
-  `m_enabled` tinyint(1) DEFAULT '1',
-  `q_enabled` tinyint(1) DEFAULT '1',
-  `b_enabled` tinyint(1) DEFAULT '1',
-  `a_enabled` tinyint(1) DEFAULT '1',
-  `bia_enabled` tinyint(1) DEFAULT '1',
-  `tria_enabled` tinyint(1) DEFAULT '1',
   PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `product_payment_period`
+--
+
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `product_payment_period` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `product_payment_id` bigint(20) NOT NULL,
+  `code` varchar(10) NOT NULL COMMENT 'Box_Period code, e.g. 1M, 3Y, 45D',
+  `price` decimal(18,2) NOT NULL DEFAULT '0.00',
+  `setup_price` decimal(18,2) NOT NULL DEFAULT '0.00',
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `sort_order` int(11) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `product_payment_period_unique` (`product_payment_id`,`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 /*!40101 SET character_set_client = @saved_cs_client */;
 

@@ -30,6 +30,32 @@ use Symfony\Component\Intl\Locales;
 
 class Service implements InjectionAwareInterface
 {
+    /**
+     * Columns on the `client` table permitted in CSV exports.
+     * Sensitive columns (pass, salt, api_token) are excluded by omission;
+     * new entity columns must be added here to be exportable.
+     */
+    private const array EXPORTABLE_COLUMNS = [
+        'id', 'aid', 'client_group_id', 'role', 'auth_type', 'email', 'status',
+        'email_approved', 'tax_exempt', 'type', 'first_name', 'last_name',
+        'gender', 'birthday', 'phone_cc', 'phone', 'company', 'company_vat',
+        'company_number', 'address_1', 'address_2', 'city', 'state', 'postcode',
+        'country', 'notes', 'currency', 'lang', 'timezone', 'ip', 'referred_by',
+        'billing_email',
+        'custom_1', 'custom_2', 'custom_3', 'custom_4', 'custom_5', 'custom_6',
+        'custom_7', 'custom_8', 'custom_9', 'custom_10', 'custom_11', 'custom_12',
+        'custom_13', 'custom_14', 'custom_15', 'custom_16', 'custom_17', 'custom_18',
+        'custom_19', 'custom_20',
+        'created_at', 'updated_at',
+    ];
+
+    /** Subset of EXPORTABLE_COLUMNS used when the caller passes no headers. */
+    private const array DEFAULT_EXPORT_COLUMNS = [
+        'id', 'email', 'status', 'first_name', 'last_name', 'phone_cc', 'phone',
+        'company', 'company_vat', 'company_number', 'address_1', 'address_2',
+        'city', 'state', 'postcode', 'country', 'currency',
+    ];
+
     protected ?\Pimple\Container $di = null;
 
     private ClientRepository $clientRepository;
@@ -448,7 +474,7 @@ class Service implements InjectionAwareInterface
         return $this->clientRepository->findOneByEmail($email) instanceof Client;
     }
 
-    public function getByLoginDetails($email, $password)
+    public function getByLoginDetails($email, $password): ?object
     {
         return $this->clientRepository->findOneBy(['email' => $email, 'pass' => $password, 'status' => Client::ACTIVE]);
     }
@@ -593,7 +619,7 @@ class Service implements InjectionAwareInterface
                 $details[$field] = $client->{$field};
             }
 
-            $group = $this->di['db']->load('ClientGroup', $client->client_group_id);
+            $group = $this->clientGroupRepository->find((int) $client->client_group_id);
             $details += [
                 'aid' => $client->aid,
                 'group_id' => $client->client_group_id,
@@ -602,7 +628,7 @@ class Service implements InjectionAwareInterface
                 'status' => $client->status,
                 'tax_exempt' => $client->tax_exempt,
                 'ip' => $client->ip,
-                'group' => $group ? $group->title : null,
+                'group' => $group instanceof ClientGroup ? $group->getTitle() : null,
                 'created_at' => $client->created_at,
                 'updated_at' => $client->updated_at,
             ];
@@ -670,7 +696,7 @@ class Service implements InjectionAwareInterface
         return true;
     }
 
-    public function createGroup(array $data)
+    public function createGroup(array $data): int
     {
         $group = new ClientGroup();
         $group->setTitle($data['title']);
@@ -790,7 +816,7 @@ class Service implements InjectionAwareInterface
         return $client;
     }
 
-    public function adminCreateClient(array $data)
+    public function adminCreateClient(array $data): int
     {
         $eventParams = $data;
         unset($eventParams['password'], $eventParams['password_confirm']);
@@ -971,7 +997,7 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    public function authorizeClient($email, $plainTextPassword)
+    public function authorizeClient($email, $plainTextPassword): ?Client
     {
         // The shared authorization service still reads the legacy bean fields directly.
         // Keep that boundary until the identity/authentication slice migrates as well.
@@ -1092,15 +1118,11 @@ class Service implements InjectionAwareInterface
     public function exportCSV(array $headers): Response
     {
         if ($headers) {
-            // Prevent the password / salt columns from being exported
-            if (isset($headers['pass'])) {
-                unset($headers['pass']);
-            }
-            if (isset($headers['salt'])) {
-                unset($headers['salt']);
-            }
-        } else {
-            $headers = ['id', 'email', 'status', 'first_name', 'last_name', 'phone_cc', 'phone', 'company', 'company_vat', 'company_number', 'address_1', 'address_2', 'city', 'state', 'postcode', 'country', 'currency'];
+            $headers = array_values(array_intersect(self::EXPORTABLE_COLUMNS, $headers));
+        }
+
+        if (!$headers) {
+            $headers = self::DEFAULT_EXPORT_COLUMNS;
         }
 
         return $this->di['csv_response_factory']->create('client', 'clients.csv', $headers);
