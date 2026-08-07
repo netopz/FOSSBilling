@@ -21,38 +21,39 @@ jobs:
         run: composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
 
       # Repo composer.json maps classes under src/library with vendor-dir=src/vendor.
-      # We deploy the flattened src/ tree as the document root, so regenerate
-      # autoload paths for library/ + modules/ before rsync.
+      # Flatten autoload for the deployed webroot WITHOUT wiping vendor package maps
+      # (a minimal COMPOSER= tempfile dump-autoload previously dropped Symfony/etc.).
       - name: Regenerate autoload for flat webroot
         run: |
-          TMP="$(mktemp)"
-          cat >"$TMP" <<'EOF'
-          {
-              "name": "fossbilling/webroot-autoload",
-              "autoload": {
-                  "psr-0": {
-                      "Payment_": "library/",
-                      "Registrar_": "library/",
-                      "Server_": "library/"
-                  },
-                  "psr-4": {
-                      "Box\\Mod\\": "modules/"
-                  },
-                  "classmap": ["library/"]
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("composer.json")
+          data = json.loads(root.read_text())
+          data["autoload"] = {
+              "psr-0": {
+                  "Payment_": "library/",
+                  "Registrar_": "library/",
+                  "Server_": "library/",
               },
-              "config": {
-                  "vendor-dir": "vendor"
-              }
+              "psr-4": {"Box\\Mod\\": "modules/"},
+              "classmap": ["library/"],
           }
-          EOF
-          # strip leading spaces introduced by YAML indentation
-          sed -i 's/^          //' "$TMP"
-          (cd src && COMPOSER="$TMP" composer dump-autoload -o --no-dev --no-interaction)
-          rm -f "$TMP"
+          data["config"]["vendor-dir"] = "vendor"
+          Path("src/composer.json").write_text(json.dumps(data, indent=4) + "\n")
+          PY
+          cp composer.lock src/composer.lock
+          (cd src && composer dump-autoload -o --no-dev --no-interaction)
           if grep -q "src/library" src/vendor/composer/autoload_classmap.php; then
             echo "ERROR: webroot autoload still references src/library" >&2
             exit 1
           fi
+          if ! grep -q 'Symfony\\\\Component\\\\Filesystem\\\\' src/vendor/composer/autoload_psr4.php; then
+            echo "ERROR: vendor package PSR-4 maps missing after dump-autoload" >&2
+            exit 1
+          fi
+          # Avoid shipping root composer files into the webroot as required app files
+          rm -f src/composer.json src/composer.lock
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -77,7 +78,7 @@ jobs:
           REMOTE_HOST: ${{ secrets.SERVER_IP }}
           REMOTE_USER: ${{ secrets.SERVER_USER }}
           TARGET: "/var/www/billing.vioflare.com/"
-          EXCLUDE: "config.php, config.old.php, data/log/, data/cache/, data/uploads/"
+          EXCLUDE: "config.php, config.old.php, data/log/, data/cache/, data/uploads/, themes/huraga/config/settings_data.json, composer.json, composer.lock"
           SCRIPT_BEFORE: |
             set -euo pipefail
             TARGET="/var/www/billing.vioflare.com"
@@ -88,7 +89,22 @@ jobs:
             set -euo pipefail
             TARGET="/var/www/billing.vioflare.com"
             mkdir -p "${TARGET}/data/log" "${TARGET}/data/cache" "${TARGET}/data/uploads"
+            # Never leave the installer web-accessible after rsync --delete
+            rm -rf "${TARGET}/install"
+            # Theme settings are gitignored; restore from example if missing
+            HURAGA_SETTINGS="${TARGET}/themes/huraga/config/settings_data.json"
+            HURAGA_EXAMPLE="${TARGET}/themes/huraga/config/settings_data.json.example"
+            if [[ ! -f "${HURAGA_SETTINGS}" && -f "${HURAGA_EXAMPLE}" ]]; then
+              cp "${HURAGA_EXAMPLE}" "${HURAGA_SETTINGS}"
+            fi
             sudo chown -R www-data:www-data "${TARGET}"
+            sudo chmod g+w "${TARGET}" || true
+            sudo chmod 664 "${TARGET}/config.php" "${TARGET}/config.old.php" 2>/dev/null || true
+            sudo find "${TARGET}/data" -type d -exec chmod 775 {} \;
             sudo find "${TARGET}/data/log" "${TARGET}/data/cache" "${TARGET}/data/uploads" -type d -exec chmod 775 {} \;
+            # Apply DB/config patches after code deploy (Doctrine upgrades, etc.)
+            if [[ -f "${TARGET}/console.php" ]]; then
+              sudo -u www-data php "${TARGET}/console.php" system:run-patcher || true
+            fi
             echo "Deploy complete: ${TARGET}"
             ls -la "${TARGET}" | head -30
