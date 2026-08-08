@@ -1820,21 +1820,7 @@ class Service implements InjectionAwareInterface
         }
 
         $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
-
-        // Resolve the Stripe gateway: an explicit id when provided, otherwise
-        // the first enabled gateway backed by the Stripe adapter.
-        if ($gatewayId) {
-            $gtw = $this->di['db']->getExistingModelById('PayGateway', $gatewayId, 'Payment gateway not found');
-            if ($gtw->gateway !== 'Stripe') {
-                throw new InformationException('Selected payment gateway is not Stripe', null, 817);
-            }
-        } else {
-            $gtw = $this->di['db']->findOne('PayGateway', "gateway = 'Stripe' AND enabled = 1");
-            if (!$gtw instanceof \Model_PayGateway) {
-                throw new InformationException('No enabled Stripe payment gateway is configured', null, 818);
-            }
-        }
-
+        $gtw = $this->resolveEnabledStripeGateway($gatewayId);
         $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
         if (!method_exists($adapter, 'createInvoicePaymentIntent')) {
             throw new InformationException('The configured Stripe gateway does not support direct PaymentIntents', null, 819);
@@ -1866,19 +1852,7 @@ class Service implements InjectionAwareInterface
         }
 
         $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
-
-        if ($gatewayId) {
-            $gtw = $this->di['db']->getExistingModelById('PayGateway', $gatewayId, 'Payment gateway not found');
-            if ($gtw->gateway !== 'Stripe') {
-                throw new InformationException('Selected payment gateway is not Stripe', null, 817);
-            }
-        } else {
-            $gtw = $this->di['db']->findOne('PayGateway', "gateway = 'Stripe' AND enabled = 1");
-            if (!$gtw instanceof \Model_PayGateway) {
-                throw new InformationException('No enabled Stripe payment gateway is configured', null, 818);
-            }
-        }
-
+        $gtw = $this->resolveEnabledStripeGateway($gatewayId);
         $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
         if (!method_exists($adapter, 'reconcilePaymentIntentById')) {
             throw new InformationException('The configured Stripe gateway does not support PaymentIntent reconciliation', null, 821);
@@ -1894,6 +1868,37 @@ class Service implements InjectionAwareInterface
             'status' => (string) $status,
             'payment_intent_id' => $paymentIntentId,
         ];
+    }
+
+    /**
+     * Resolve an enabled Stripe PayGateway entity for PaymentIntent flows.
+     * PayGateway was migrated to Doctrine; RedBean Model_PayGateway no longer exists.
+     */
+    private function resolveEnabledStripeGateway(?int $gatewayId = null): PayGateway
+    {
+        $repo = $this->di['em']->getRepository(PayGateway::class);
+
+        if ($gatewayId) {
+            $gtw = $repo->find($gatewayId);
+            if (!$gtw instanceof PayGateway) {
+                throw new InformationException('Payment gateway not found');
+            }
+            if ($gtw->getGateway() !== 'Stripe') {
+                throw new InformationException('Selected payment gateway is not Stripe', null, 817);
+            }
+            if (!$gtw->isEnabled()) {
+                throw new InformationException('No enabled Stripe payment gateway is configured', null, 818);
+            }
+
+            return $gtw;
+        }
+
+        $gtw = $repo->findEnabledByGateway('Stripe');
+        if (!$gtw instanceof PayGateway) {
+            throw new InformationException('No enabled Stripe payment gateway is configured', null, 818);
+        }
+
+        return $gtw;
     }
 
     public function generatePDF($hash, $identity): Response
