@@ -409,9 +409,18 @@ public function testConnection(): bool
      * Best-effort: run Pluto helper over SSH so the OpenPanel BIND zone includes
      * mail._domainkey (OpenPanel generates keys on disk but often omits them from
      * the zone when using external DNS). Safe no-op when SSH is unavailable.
+     *
+     * Uses a dedicated key for the PHP/FPM user:
+     *   /var/www/.ssh/id_ed25519_openpanel_dkim
+     * Override with server config key `dkim_ssh_key` if needed.
      */
     private function tryPublishDkimZone(string $domain): void
     {
+        $domain = strtolower(trim($domain));
+        if ($domain === '' || !preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/', $domain)) {
+            return;
+        }
+
         $ip = trim((string) ($this->_config['ip'] ?? ''));
         if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
             $host = trim((string) ($this->_config['host'] ?? ''));
@@ -426,17 +435,44 @@ public function testConnection(): bool
             return;
         }
 
-        $remote = '/usr/local/bin/vioflare-publish-dkim-zone ' . escapeshellarg($domain);
+        $keyPath = trim((string) ($this->_config['dkim_ssh_key'] ?? ''));
+        if ($keyPath === '') {
+            $keyPath = '/var/www/.ssh/id_ed25519_openpanel_dkim';
+        }
+        if (!is_readable($keyPath)) {
+            $this->getLog()->info('DKIM zone publish skipped for ' . $domain . ': SSH key not readable at ' . $keyPath);
+
+            return;
+        }
+
+        $knownHosts = dirname($keyPath) . '/known_hosts';
+        // Domain already validated to [a-z0-9.-]; do not quote-wrap (forced-command
+        // wrappers see the literal SSH_ORIGINAL_COMMAND including quotes).
+        $remote = '/usr/local/bin/vioflare-publish-dkim-zone ' . $domain;
+        $sshOpts = [
+            '-i ' . escapeshellarg($keyPath),
+            '-o IdentitiesOnly=yes',
+            '-o BatchMode=yes',
+            '-o ConnectTimeout=8',
+            '-o StrictHostKeyChecking=accept-new',
+        ];
+        if (is_readable($knownHosts)) {
+            $sshOpts[] = '-o UserKnownHostsFile=' . escapeshellarg($knownHosts);
+        }
         $cmd = sprintf(
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new %s %s 2>&1',
+            'ssh %s %s %s 2>&1',
+            implode(' ', $sshOpts),
             escapeshellarg('root@' . $ip),
             escapeshellarg($remote)
         );
+
         $output = [];
         $code = 0;
         @exec($cmd, $output, $code);
         if ($code !== 0) {
             $this->getLog()->info('DKIM zone publish helper skipped/failed for ' . $domain . ': ' . implode(' ', $output));
+        } else {
+            $this->getLog()->info('DKIM zone publish OK for ' . $domain . ': ' . implode(' ', $output));
         }
     }
 
