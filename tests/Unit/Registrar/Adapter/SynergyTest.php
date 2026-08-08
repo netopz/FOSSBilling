@@ -153,4 +153,116 @@ describe('Registrar_Adapter_Synergy', function (): void {
 
         expect($adapter->isDomainAvailable(buildSynergyDomain()))->toBeFalse();
     });
+
+    test('listDnsZone normalises Synergy record fields', function (): void {
+        $client = Mockery::mock(SoapClient::class);
+        $client->shouldReceive('__soapCall')
+            ->once()
+            ->with('listDNSZone', Mockery::type('array'))
+            ->andReturn((object) [
+                'status' => 'OK',
+                'records' => [
+                    (object) [
+                        'id' => 'abc123',
+                        'hostName' => 'www.example-test.com.au',
+                        'type' => 'A',
+                        'content' => '1.2.3.4',
+                        'ttl' => '3600',
+                        'prio' => '0',
+                    ],
+                ],
+            ]);
+
+        $adapter = buildSynergyAdapter($client);
+        $records = $adapter->listDnsZone('example-test.com.au');
+
+        expect($records)->toHaveCount(1)
+            ->and($records[0]['id'])->toBe('abc123')
+            ->and($records[0]['hostname'])->toBe('www.example-test.com.au')
+            ->and($records[0]['type'])->toBe('A')
+            ->and($records[0]['content'])->toBe('1.2.3.4')
+            ->and($records[0]['priority'])->toBeNull();
+    });
+
+    test('addDnsRecord sends Synergy request field names', function (): void {
+        $captured = null;
+        $client = Mockery::mock(SoapClient::class);
+        $client->shouldReceive('__soapCall')
+            ->once()
+            ->with('addDNSRecord', Mockery::on(function (array $args) use (&$captured): bool {
+                $captured = $args[0] ?? null;
+
+                return is_array($captured);
+            }))
+            ->andReturn((object) ['status' => 'OK', 'id' => 'rec1']);
+
+        $adapter = buildSynergyAdapter($client);
+        $result = $adapter->addDnsRecord('example-test.com.au', 'www', 'A', '1.2.3.4', 3600);
+
+        expect($result['id'])->toBe('rec1')
+            ->and($captured['domainName'])->toBe('example-test.com.au')
+            ->and($captured['recordName'])->toBe('www')
+            ->and($captured['recordType'])->toBe('A')
+            ->and($captured['recordContent'])->toBe('1.2.3.4')
+            ->and($captured['recordTTL'])->toBe(3600)
+            ->and($captured['recordPrio'])->toBe(0);
+    });
+
+    test('upsertDnsRecord updates when hostname and type already exist', function (): void {
+        $client = Mockery::mock(SoapClient::class);
+        $client->shouldReceive('__soapCall')
+            ->once()
+            ->with('listDNSZone', Mockery::type('array'))
+            ->andReturn((object) [
+                'status' => 'OK',
+                'records' => [
+                    (object) [
+                        'id' => 'apex-a',
+                        'hostName' => 'example-test.com.au',
+                        'type' => 'A',
+                        'content' => '9.9.9.9',
+                        'ttl' => '3600',
+                        'prio' => '0',
+                    ],
+                ],
+            ]);
+        $client->shouldReceive('__soapCall')
+            ->once()
+            ->with('updateDNSRecord', Mockery::on(function (array $args): bool {
+                $req = $args[0] ?? [];
+
+                return ($req['recordID'] ?? null) === 'apex-a'
+                    && ($req['recordContent'] ?? null) === '1.2.3.4'
+                    && ($req['recordTTL'] ?? null) === '3600';
+            }))
+            ->andReturn((object) ['status' => 'OK']);
+
+        $adapter = buildSynergyAdapter($client);
+        $result = $adapter->upsertDnsRecord('example-test.com.au', '@', 'A', '1.2.3.4');
+
+        expect($result['action'])->toBe('updated')->and($result['id'])->toBe('apex-a');
+    });
+
+    test('applyHostingDns applies web and mail records', function (): void {
+        $client = Mockery::mock(SoapClient::class);
+        // ensureDnsZone list
+        $client->shouldReceive('__soapCall')->with('listDNSZone', Mockery::type('array'))->andReturn((object) [
+            'status' => 'OK',
+            'records' => [],
+        ]);
+        // adds for apex A, www A, mail A, MX, SPF, DMARC, DKIM
+        $client->shouldReceive('__soapCall')
+            ->with('addDNSRecord', Mockery::type('array'))
+            ->times(7)
+            ->andReturn((object) ['status' => 'OK', 'id' => 'new']);
+
+        $adapter = buildSynergyAdapter($client);
+        $result = $adapter->applyHostingDns('example-test.com.au', '173.249.33.154', [
+            'dkim_txt' => 'v=DKIM1; p=abc',
+        ]);
+
+        expect($result['web'])->toHaveKeys(['apex_a', 'www_a'])
+            ->and($result['mail'])->toHaveKeys(['mail_a', 'mx', 'spf', 'dmarc', 'dkim'])
+            ->and($result['mail']['dkim']['action'])->toBe('added');
+    });
 });

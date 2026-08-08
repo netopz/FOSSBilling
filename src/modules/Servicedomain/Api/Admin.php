@@ -421,6 +421,67 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         return $this->getService()->registrarUpdate($model, $data);
     }
 
+    /**
+     * List Synergy DNS zone records for a domain.
+     *
+     * @optional string $registrar - adapter code (default Synergy)
+     *
+     * @return list<array>
+     */
+    #[RequiredParams(['domain' => 'Domain name is missing'])]
+    public function dns_list($data)
+    {
+        $this->checkPermissions('servicedomain', 'manage_domains');
+
+        return $this->_getSynergyDnsAdapter($data)->listDnsZone((string) $data['domain']);
+    }
+
+    /**
+     * Apply Synergy web + mail DNS for a hosting domain (A/MX/SPF/DMARC, optional DKIM).
+     *
+     * @optional string $dkim_txt - OpenPanel DKIM public TXT value
+     * @optional string $registrar - adapter code (default Synergy)
+     *
+     * @return array
+     */
+    #[RequiredParams([
+        'domain' => 'Domain name is missing',
+        'ip' => 'Server IPv4 is missing',
+    ])]
+    public function dns_apply_hosting($data)
+    {
+        $this->checkPermissions('servicedomain', 'manage_domains');
+
+        $options = [];
+        if (!empty($data['dkim_txt'])) {
+            $options['dkim_txt'] = (string) $data['dkim_txt'];
+        }
+
+        return $this->_getSynergyDnsAdapter($data)->applyHostingDns(
+            (string) $data['domain'],
+            (string) $data['ip'],
+            $options,
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private function _getSynergyDnsAdapter(array $data): \Registrar_Adapter_Synergy
+    {
+        $adapterName = (string) ($data['registrar'] ?? 'Synergy');
+        $registrar = $this->getService()->registrarFindByAdapter($adapterName);
+        if (!$registrar) {
+            throw new \FOSSBilling\Exception('Registrar adapter :adapter is not installed', [':adapter' => $adapterName]);
+        }
+        $adapter = $this->getService()->registrarGetRegistrarAdapter($registrar);
+        if (!$adapter instanceof \Registrar_Adapter_Synergy) {
+            throw new \FOSSBilling\Exception('Registrar :adapter does not support Synergy DNS zone methods', [':adapter' => $adapterName]);
+        }
+
+        return $adapter;
+    }
+
     #[RequiredParams(['order_id' => 'Order ID is missing'])]
     protected function _getService($data)
     {

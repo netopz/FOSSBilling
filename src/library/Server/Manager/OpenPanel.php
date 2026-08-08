@@ -340,7 +340,7 @@ public function testConnection(): bool
     {
         $client = $account->getClient();
         $package = $account->getPackage();
-        $this->getLog()->info('Creating account ' . $client->getUsername());
+        $this->getLog()->info('Creating account ' . $account->getUsername());
         $data = json_encode(array(
             "email" => $client->getEmail(),
             'username' => $account->getUsername(),
@@ -353,18 +353,190 @@ public function testConnection(): bool
         $rawResponse = $this->makeApiRequest("users", $data, 'POST');
         $response = json_decode($rawResponse);
     
+        $created = false;
         if (is_object($response) && !empty($response->success)) {
-            return true;
+            $created = true;
         }
     
         // https://github.com/stefanpejcic/FOSSBilling-OpenPanel/issues/2
-        if (strpos($rawResponse, 'Successfully added user') !== false) {
-            return true;
+        if (!$created && strpos($rawResponse, 'Successfully added user') !== false) {
+            $created = true;
         }
-    
-        $errorMsg = is_object($response) && isset($response->error) ? $response->error : $rawResponse;
-        throw new Server_Exception('Error when creating ' . $client->getUsername() . ': ' . $errorMsg);
-        
+
+        if (!$created) {
+            $errorMsg = is_object($response) && isset($response->error) ? $response->error : $rawResponse;
+            throw new Server_Exception('Error when creating ' . $account->getUsername() . ': ' . $errorMsg);
+        }
+
+        // Attach the order domain to the new user (FOSS createAccount historically
+        // only created the user). Failures are logged; Synergy DNS still proceeds.
+        $domain = trim((string) $account->getDomain());
+        if ($domain !== '') {
+            try {
+                $domainPayload = json_encode([
+                    'username' => $account->getUsername(),
+                    'domain' => $domain,
+                    'docroot' => '/var/www/html/' . $domain,
+                ]);
+                $domainResponse = $this->makeApiRequest('domains/new', $domainPayload, 'POST');
+                $this->getLog()->info('OpenPanel domain create response for ' . $domain . ': ' . substr((string) $domainResponse, 0, 300));
+                // Ensure OpenDKIM public TXT is visible via GET /domains/{domain}/dns
+                // so Synergy external DNS apply can pick it up automatically.
+                $this->tryPublishDkimZone($domain);
+            } catch (\Throwable $e) {
+                $this->getLog()->error('OpenPanel domain attach failed for ' . $domain . ': ' . $e->getMessage());
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Best-effort: run Pluto helper over SSH so the OpenPanel BIND zone includes
+     * mail._domainkey (OpenPanel generates keys on disk but often omits them from
+     * the zone when using external DNS). Safe no-op when SSH is unavailable.
+     */
+    private function tryPublishDkimZone(string $domain): void
+    {
+        $ip = trim((string) ($this->_config['ip'] ?? ''));
+        if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
+            $host = trim((string) ($this->_config['host'] ?? ''));
+            if ($host !== '') {
+                $resolved = gethostbyname($host);
+                if (is_string($resolved) && $resolved !== $host && filter_var($resolved, FILTER_VALIDATE_IP)) {
+                    $ip = $resolved;
+                }
+            }
+        }
+        if ($ip === '') {
+            return;
+        }
+
+        $remote = '/usr/local/bin/vioflare-publish-dkim-zone ' . escapeshellarg($domain);
+        $cmd = sprintf(
+            'ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new %s %s 2>&1',
+            escapeshellarg('root@' . $ip),
+            escapeshellarg($remote)
+        );
+        $output = [];
+        $code = 0;
+        @exec($cmd, $output, $code);
+        if ($code !== 0) {
+            $this->getLog()->info('DKIM zone publish helper skipped/failed for ' . $domain . ': ' . implode(' ', $output));
+        }
+    }
+
+    /**
+     * Read the OpenDKIM public TXT value OpenPanel expects for external DNS (Synergy).
+     * Prefers the panel BIND zone (published on domain create); falls back to
+     * deliverability payloads when the API returns structured DKIM data.
+     */
+    public function getDkimPublicTxt(string $domain): ?string
+    {
+        $domain = strtolower(trim($domain));
+        if ($domain === '') {
+            return null;
+        }
+
+        for ($attempt = 0; $attempt < 6; ++$attempt) {
+            if ($attempt > 0) {
+                usleep(500_000);
+            }
+
+            $fromZone = $this->getDkimPublicTxtFromZone($domain);
+            if ($fromZone !== null) {
+                return $fromZone;
+            }
+
+            $fromDeliverability = $this->getDkimPublicTxtFromDeliverability($domain);
+            if ($fromDeliverability !== null) {
+                return $fromDeliverability;
+            }
+        }
+
+        return null;
+    }
+
+    private function getDkimPublicTxtFromZone(string $domain): ?string
+    {
+        $raw = $this->makeApiRequest('domains/' . rawurlencode($domain) . '/dns');
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            return null;
+        }
+        $content = (string) ($data['content'] ?? '');
+        if ($content === '') {
+            return null;
+        }
+
+        return $this->extractDkimTxtFromBindZone($content);
+    }
+
+    private function getDkimPublicTxtFromDeliverability(string $domain): ?string
+    {
+        $raw = $this->makeApiRequest('emails/deliverability/' . rawurlencode($domain));
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            return null;
+        }
+
+        $candidates = [
+            $data['dkim']['expected'] ?? null,
+            $data['dkim']['current'] ?? null,
+            $data['expected']['dkim'] ?? null,
+            $data['dkim_txt'] ?? null,
+        ];
+        foreach ($candidates as $candidate) {
+            if (is_string($candidate) && str_starts_with(trim($candidate), 'v=DKIM1')) {
+                return trim($candidate, " \t\"'");
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract a flattened DKIM TXT value from an OpenPanel/BIND zone file body.
+     */
+    public function extractDkimTxtFromBindZone(string $zoneContent): ?string
+    {
+        // Single-line TXT: mail._domainkey ... "v=DKIM1; ..."
+        if (preg_match('/mail\._domainkey[^\n]*\sIN\s+TXT\s+("(?:\\\\.|[^"\\\\])*"(?:\s*"(?:\\\\.|[^"\\\\])*")*)/i', $zoneContent, $m)) {
+            return $this->flattenBindTxtRdata($m[1]);
+        }
+        // Multi-line TXT with parentheses
+        if (preg_match('/mail\._domainkey[^\n]*\sIN\s+TXT\s+\((.*?)\)/is', $zoneContent, $m)) {
+            return $this->flattenBindTxtRdata($m[1]);
+        }
+        // Parentheses form used by opendkim mail.txt pasted into zones
+        if (preg_match('/mail\._domainkey[^\n]*\sTXT\s+\((.*?)\)/is', $zoneContent, $m)) {
+            return $this->flattenBindTxtRdata($m[1]);
+        }
+
+        return null;
+    }
+
+    private function flattenBindTxtRdata(string $rdata): ?string
+    {
+        if (!preg_match_all('/"((?:\\\\.|[^"\\\\])*)"/', $rdata, $parts)) {
+            $flat = trim(preg_replace('/\s+/', '', $rdata) ?? '');
+            $flat = trim($flat, " \t\"'");
+
+            return str_starts_with($flat, 'v=DKIM1') ? $flat : null;
+        }
+        $flat = '';
+        foreach ($parts[1] as $chunk) {
+            $flat .= stripcslashes($chunk);
+        }
+        $flat = trim($flat);
+
+        return str_starts_with($flat, 'v=DKIM1') ? $flat : null;
     }
         
         /**

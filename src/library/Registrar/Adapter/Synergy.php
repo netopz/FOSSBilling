@@ -280,6 +280,226 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
     }
 
     /**
+     * List DNS zone records for a domain hosted on Synergy DNS.
+     *
+     * @return list<array{id: string, hostname: string, type: string, content: string, ttl: int, priority: int|null}>
+     */
+    public function listDnsZone(string $domainName): array
+    {
+        $result = $this->call('listDNSZone', ['domainName' => $domainName], strict: false);
+        $status = strtoupper((string) ($result->status ?? ''));
+        if ($status !== '' && !preg_match('/^OK/', $status)) {
+            $message = (string) ($result->errorMessage ?? $result->statusDescription ?? $status);
+            // Missing zone is not fatal for callers that will create one.
+            if (str_contains(strtolower($message), 'not found') || str_contains(strtolower($status), 'not_found')) {
+                return [];
+            }
+            throw new Registrar_Exception(':type registrar error: :error', [':type' => 'Synergy Wholesale', ':error' => $message]);
+        }
+
+        return $this->normaliseDnsRecords($result->records ?? null);
+    }
+
+    public function addDnsZone(string $domainName): bool
+    {
+        $this->call('addDNSZone', ['domainName' => $domainName]);
+
+        return true;
+    }
+
+    /**
+     * Ensure a Synergy DNS zone exists (list or create).
+     */
+    public function ensureDnsZone(string $domainName): bool
+    {
+        $result = $this->call('listDNSZone', ['domainName' => $domainName], strict: false);
+        $status = strtoupper((string) ($result->status ?? ''));
+        if (preg_match('/^OK/', $status)) {
+            return true;
+        }
+
+        return $this->addDnsZone($domainName);
+    }
+
+    /**
+     * @return array{id: string|null, status: string}
+     */
+    public function addDnsRecord(
+        string $domainName,
+        string $hostname,
+        string $type,
+        string $content,
+        int $ttl = 3600,
+        ?int $priority = null,
+    ): array {
+        $result = $this->call('addDNSRecord', [
+            'domainName' => $domainName,
+            'recordName' => $hostname,
+            'recordType' => strtoupper($type),
+            'recordContent' => $content,
+            'recordTTL' => $ttl,
+            'recordPrio' => $priority ?? 0,
+        ]);
+
+        return [
+            'id' => isset($result->id) ? (string) $result->id : (isset($result->recordID) ? (string) $result->recordID : null),
+            'status' => (string) ($result->status ?? 'OK'),
+        ];
+    }
+
+    public function updateDnsRecord(
+        string $domainName,
+        string $recordId,
+        string $hostname,
+        string $type,
+        string $content,
+        int $ttl = 3600,
+        ?int $priority = null,
+    ): bool {
+        $this->call('updateDNSRecord', [
+            'domainName' => $domainName,
+            'recordID' => $recordId,
+            'recordName' => $hostname,
+            'recordType' => strtoupper($type),
+            'recordContent' => $content,
+            'recordTTL' => (string) $ttl,
+            'recordPrio' => $priority ?? 0,
+        ]);
+
+        return true;
+    }
+
+    public function deleteDnsRecord(string $domainName, string $recordId): bool
+    {
+        $this->call('deleteDNSRecord', [
+            'domainName' => $domainName,
+            'recordID' => $recordId,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Create or update a DNS record matched by hostname + type (+ optional content prefix).
+     *
+     * @param array{content_prefix?: string, match_any_of_type?: bool} $match
+     *
+     * @return array{action: string, id: string|null}
+     */
+    public function upsertDnsRecord(
+        string $domainName,
+        string $hostname,
+        string $type,
+        string $content,
+        int $ttl = 3600,
+        ?int $priority = null,
+        array $match = [],
+    ): array {
+        $type = strtoupper($type);
+        $records = $this->listDnsZone($domainName);
+        $existing = $this->findDnsRecord($records, $domainName, $hostname, $type, $match);
+
+        if ($existing !== null) {
+            $sameContent = trim((string) $existing['content'], '"') === trim($content, '"');
+            $samePrio = (string) ($existing['priority'] ?? 0) === (string) ($priority ?? 0);
+            if ($sameContent && $samePrio) {
+                return ['action' => 'unchanged', 'id' => $existing['id']];
+            }
+            $this->updateDnsRecord($domainName, $existing['id'], $hostname, $type, $content, $ttl, $priority);
+
+            return ['action' => 'updated', 'id' => $existing['id']];
+        }
+
+        $added = $this->addDnsRecord($domainName, $hostname, $type, $content, $ttl, $priority);
+
+        return ['action' => 'added', 'id' => $added['id']];
+    }
+
+    /**
+     * Apply standard web A records for hosting (@ and www → IPv4).
+     * Removes apex ALIAS records that would conflict with an A record.
+     *
+     * @return array<string, array{action: string, id: string|null}>
+     */
+    public function applyWebDns(string $domainName, string $ipv4): array
+    {
+        $this->ensureDnsZone($domainName);
+        $this->removeConflictingAlias($domainName);
+
+        return [
+            'apex_a' => $this->upsertDnsRecord($domainName, '@', 'A', $ipv4),
+            'www_a' => $this->upsertDnsRecord($domainName, 'www', 'A', $ipv4),
+        ];
+    }
+
+    /**
+     * Apply mail-related DNS: mail A, MX, SPF, optional DKIM, DMARC.
+     *
+     * OpenPanel generates DKIM keys locally; pass the public TXT value via $dkimTxt
+     * when available. Without $dkimTxt, MX/SPF/DMARC/mail A are still applied.
+     *
+     * @return array<string, array{action: string, id: string|null}|null>
+     */
+    public function applyMailDns(
+        string $domainName,
+        string $ipv4,
+        ?string $dkimTxt = null,
+        ?string $mxHost = null,
+        ?string $dmarc = null,
+    ): array {
+        $this->ensureDnsZone($domainName);
+        $mxHost = $mxHost ?: ('mail.' . $domainName . '.');
+        if (!str_ends_with($mxHost, '.')) {
+            $mxHost .= '.';
+        }
+        $spf = sprintf('v=spf1 ip4:%s ~all', $ipv4);
+        $dmarc = $dmarc ?: sprintf('v=DMARC1; p=none; rua=mailto:postmaster@%s', $domainName);
+
+        $out = [
+            'mail_a' => $this->upsertDnsRecord($domainName, 'mail', 'A', $ipv4),
+            'mx' => $this->upsertDnsRecord($domainName, '@', 'MX', $mxHost, 3600, 10, ['match_any_of_type' => true]),
+            'spf' => $this->upsertDnsRecord($domainName, '@', 'TXT', $spf, 3600, null, ['content_prefix' => 'v=spf1']),
+            'dmarc' => $this->upsertDnsRecord($domainName, '_dmarc', 'TXT', $dmarc, 3600, null, ['content_prefix' => 'v=DMARC1']),
+            'dkim' => null,
+        ];
+
+        if ($dkimTxt !== null && $dkimTxt !== '') {
+            $out['dkim'] = $this->upsertDnsRecord(
+                $domainName,
+                'mail._domainkey',
+                'TXT',
+                $dkimTxt,
+                3600,
+                null,
+                ['content_prefix' => 'v=DKIM1'],
+            );
+        }
+
+        return $out;
+    }
+
+    /**
+     * Apply web + mail DNS records for a hosting activation on Synergy DNS.
+     *
+     * @param array{dkim_txt?: string, mx_host?: string, dmarc?: string} $options
+     *
+     * @return array{web: array, mail: array}
+     */
+    public function applyHostingDns(string $domainName, string $ipv4, array $options = []): array
+    {
+        return [
+            'web' => $this->applyWebDns($domainName, $ipv4),
+            'mail' => $this->applyMailDns(
+                $domainName,
+                $ipv4,
+                $options['dkim_txt'] ?? null,
+                $options['mx_host'] ?? null,
+                $options['dmarc'] ?? null,
+            ),
+        ];
+    }
+
+    /**
      * Synergy does not expose a documented public sandbox WSDL in this adapter.
      * Staging should use live credentials with disposable test domains only.
      */
@@ -444,5 +664,110 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         $timestamp = strtotime((string) $value);
 
         return $timestamp ?: null;
+    }
+
+    /**
+     * @return list<array{id: string, hostname: string, type: string, content: string, ttl: int, priority: int|null}>
+     */
+    private function normaliseDnsRecords(mixed $records): array
+    {
+        if ($records === null) {
+            return [];
+        }
+        if (!is_array($records)) {
+            $items = $records->item ?? null;
+            if ($items === null) {
+                return [];
+            }
+            $records = is_array($items) ? $items : [$items];
+        }
+
+        $out = [];
+        foreach ($records as $record) {
+            if (!is_object($record) && !is_array($record)) {
+                continue;
+            }
+            $get = static function (object|array $row, string $key): mixed {
+                if (is_array($row)) {
+                    return $row[$key] ?? null;
+                }
+
+                return $row->{$key} ?? null;
+            };
+            $ttlRaw = $get($record, 'ttl');
+            $prioRaw = $get($record, 'prio');
+            $out[] = [
+                'id' => (string) ($get($record, 'id') ?? ''),
+                'hostname' => (string) ($get($record, 'hostName') ?? ''),
+                'type' => strtoupper((string) ($get($record, 'type') ?? '')),
+                'content' => (string) ($get($record, 'content') ?? ''),
+                'ttl' => $ttlRaw !== null && $ttlRaw !== '' ? (int) $ttlRaw : 3600,
+                'priority' => ($prioRaw !== null && (string) $prioRaw !== '' && (string) $prioRaw !== '0')
+                    ? (int) $prioRaw
+                    : null,
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param list<array{id: string, hostname: string, type: string, content: string, ttl: int, priority: int|null}> $records
+     * @param array{content_prefix?: string, match_any_of_type?: bool} $match
+     *
+     * @return array{id: string, hostname: string, type: string, content: string, ttl: int, priority: int|null}|null
+     */
+    private function findDnsRecord(array $records, string $domainName, string $hostname, string $type, array $match = []): ?array
+    {
+        $type = strtoupper($type);
+        $prefix = isset($match['content_prefix']) ? strtolower((string) $match['content_prefix']) : null;
+        $anyOfType = !empty($match['match_any_of_type']);
+
+        foreach ($records as $record) {
+            if (($record['type'] ?? '') !== $type) {
+                continue;
+            }
+            if (!$anyOfType && !$this->hostMatchesDns((string) $record['hostname'], $hostname, $domainName)) {
+                continue;
+            }
+            if ($prefix !== null && !str_starts_with(strtolower(trim((string) $record['content'], '"')), $prefix)) {
+                continue;
+            }
+
+            return $record;
+        }
+
+        return null;
+    }
+
+    private function hostMatchesDns(string $hostname, string $want, string $domainName): bool
+    {
+        $hostname = strtolower(rtrim($hostname, '.'));
+        $want = strtolower(rtrim($want, '.'));
+        $domainName = strtolower($domainName);
+
+        if ($want === '@') {
+            return in_array($hostname, ['@', $domainName, ''], true);
+        }
+
+        return in_array($hostname, [$want, $want . '.' . $domainName], true)
+            || str_contains($hostname, $want);
+    }
+
+    private function removeConflictingAlias(string $domainName): void
+    {
+        foreach ($this->listDnsZone($domainName) as $record) {
+            if (($record['type'] ?? '') !== 'ALIAS') {
+                continue;
+            }
+            if (!$this->hostMatchesDns((string) $record['hostname'], '@', $domainName)) {
+                continue;
+            }
+            if ($record['id'] === '') {
+                continue;
+            }
+            $this->deleteDnsRecord($domainName, $record['id']);
+            $this->getLog()->info(sprintf('Removed Synergy ALIAS for %s before applying A record', $domainName));
+        }
     }
 }

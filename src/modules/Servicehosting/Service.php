@@ -222,6 +222,10 @@ class Service implements InjectionAwareInterface
             $adapter->createAccount($account);
         }
 
+        // Push web/mail DNS to Synergy when the domain is on Synergy DNS hosting.
+        // Failures are logged and do not roll back a successful panel provision.
+        $this->applySynergyHostingDns($model, $config);
+
         // Update the service's password to a placeholder value for security reasons
         $model->setPass(self::PASSWORD_PLACEHOLDER);
 
@@ -1475,6 +1479,100 @@ class Service implements InjectionAwareInterface
             'username' => $model->getUsername(),
             default => null,
         };
+    }
+
+    /**
+     * After OpenPanel/Plesk account create, push A/MX/SPF/DMARC (and optional DKIM)
+     * to Synergy DNS when the Synergy registrar adapter is installed.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function applySynergyHostingDns(ServiceHosting $model, array $config = []): void
+    {
+        $sld = (string) $model->getSld();
+        $tld = (string) $model->getTld();
+        if ($sld === '' || $tld === '') {
+            return;
+        }
+        $domainName = $sld . $tld;
+        $ipv4 = (string) ($model->getIp() ?: '');
+        if ($ipv4 === '') {
+            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
+            $ipv4 = $server instanceof ServiceHostingServer ? (string) ($server->getIp() ?: '') : '';
+        }
+        if ($ipv4 === '' || !filter_var($ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $this->di['logger']->warning(sprintf('Skipping Synergy DNS apply for %s: missing IPv4', $domainName));
+
+            return;
+        }
+
+        try {
+            /** @var \Box\Mod\Servicedomain\Service $domainService */
+            $domainService = $this->di['mod_service']('servicedomain');
+            $registrarModel = $domainService->registrarFindByAdapter('Synergy');
+            if (!$registrarModel) {
+                return;
+            }
+            $adapter = $domainService->registrarGetRegistrarAdapter($registrarModel);
+            if (!$adapter instanceof \Registrar_Adapter_Synergy) {
+                return;
+            }
+
+            $options = [];
+            if (!empty($config['dkim_txt']) && is_string($config['dkim_txt'])) {
+                $options['dkim_txt'] = $config['dkim_txt'];
+            } else {
+                $dkim = $this->fetchOpenPanelDkimTxt($model, $domainName);
+                if ($dkim !== null) {
+                    $options['dkim_txt'] = $dkim;
+                }
+            }
+
+            $result = $adapter->applyHostingDns($domainName, $ipv4, $options);
+            $this->di['logger']->info(
+                sprintf('Applied Synergy hosting DNS for %s → %s: %s', $domainName, $ipv4, json_encode($result))
+            );
+        } catch (\Throwable $e) {
+            // Do not fail activation if DNS provider is unreachable or the domain
+            // is not on Synergy DNS hosting; panel account already exists.
+            $this->di['logger']->warning(
+                sprintf('Synergy hosting DNS apply failed for %s: %s', $domainName, $e->getMessage())
+            );
+        }
+    }
+
+    /**
+     * When the hosting server is OpenPanel, read the DKIM public TXT the panel
+     * generated so Synergy external DNS can be updated automatically.
+     */
+    private function fetchOpenPanelDkimTxt(ServiceHosting $model, string $domainName): ?string
+    {
+        try {
+            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
+            if (!$server instanceof ServiceHostingServer) {
+                return null;
+            }
+            if (strtolower((string) $server->getManager()) !== 'openpanel') {
+                return null;
+            }
+            $manager = $this->getServerManager($server);
+            if (!$manager instanceof \Server_Manager_Openpanel) {
+                return null;
+            }
+            if (!method_exists($manager, 'getDkimPublicTxt')) {
+                return null;
+            }
+            $dkim = $manager->getDkimPublicTxt($domainName);
+            if (is_string($dkim) && str_starts_with($dkim, 'v=DKIM1')) {
+                return $dkim;
+            }
+        } catch (\Throwable $e) {
+            $this->di['logger']->warning(
+                sprintf('OpenPanel DKIM lookup failed for %s: %s', $domainName, $e->getMessage())
+            );
+        }
+
+        return null;
     }
 
     private function _getOrderService(\Model_ClientOrder $order): ServiceHosting

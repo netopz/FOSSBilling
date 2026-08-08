@@ -1025,6 +1025,11 @@ class Service implements \FOSSBilling\InjectionAwareInterface
         return $this->getTldRegistrarRepository()->findActiveRegistrar();
     }
 
+    public function registrarFindByAdapter(string $adapterName): ?TldRegistrar
+    {
+        return $this->getTldRegistrarRepository()->findOneByRegistrar($adapterName);
+    }
+
     public function registrarGetConfiguration(TldRegistrar $model): array
     {
         return json_decode($model->getConfig() ?? '', true) ?? [];

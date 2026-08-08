@@ -44,4 +44,9 @@ class TldRegistrarRepository extends EntityRepository
             ->getQuery()
             ->getOneOrNullResult();
     }
+
+    public function findOneByRegistrar(string $registrar): ?TldRegistrar
+    {
+        return $this->findOneBy(['registrar' => $registrar]);
+    }
 }
