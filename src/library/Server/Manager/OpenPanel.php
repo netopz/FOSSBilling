@@ -289,7 +289,12 @@ public function testConnection(): bool
 
     /**
      * Generates a username for a new account on the OpenPanel server.
-     * The username is generated based on the domain name, with some modifications to comply with OpenPanel's username restrictions.
+     *
+     * Must be unique across the panel. The previous scheme (7 domain chars +
+     * one digit) only had ~10 variants per domain prefix and collided under
+     * parallel E2E / same-domain orders.
+     *
+     * Format: vf{domainSlug}{8 hex} — lowercase alphanumeric, ≤32 chars.
      *
      * @param string $domain the domain name for which to generate a username
      *
@@ -299,15 +304,24 @@ public function testConnection(): bool
      */
     public function generateUsername(string $domain): string
     {
-        $processedDomain = strtolower(preg_replace('/[^A-Za-z0-9]/', '', $domain));
-        $username = substr($processedDomain, 0, 7) . random_int(0, 9);
-
-        // OpenPanel doesn't allow usernames to start with "test", so replace it with a random string if it does (test3456 would then become something like a62f93456).
-        if (str_starts_with($username, 'test')) {
-            $username = substr_replace($username, 'a' . bin2hex(random_bytes(2)), 0, 5);
+        $processedDomain = strtolower((string) preg_replace('/[^A-Za-z0-9]/', '', $domain));
+        // Avoid a leading digit in the slug so the final name stays POSIX-friendly
+        // even if the vf prefix is ever removed.
+        $slug = substr(ltrim($processedDomain, '0123456789'), 0, 6);
+        if ($slug === '') {
+            $slug = 'u' . bin2hex(random_bytes(2));
         }
 
-        return $username;
+        // 8 hex chars ≈ 4.3e9 space — enough that same-domain parallel creates
+        // do not collide in practice.
+        $username = 'vf' . $slug . bin2hex(random_bytes(4));
+
+        // OpenPanel rejects usernames starting with "test".
+        if (str_starts_with($username, 'test')) {
+            $username = 'a' . substr($username, 1);
+        }
+
+        return substr($username, 0, 32);
     }
 
     /**

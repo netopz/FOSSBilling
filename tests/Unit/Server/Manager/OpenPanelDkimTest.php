@@ -45,4 +45,31 @@ ZONE;
         $manager = buildOpenPanelManager();
         expect($manager->extractDkimTxtFromBindZone('@ IN A 1.2.3.4'))->toBeNull();
     });
+
+    test('generateUsername is unique for the same domain', function (): void {
+        $manager = buildOpenPanelManager();
+        $names = [];
+        for ($i = 0; $i < 50; ++$i) {
+            $names[] = $manager->generateUsername('example.com');
+        }
+
+        expect(count(array_unique($names)))->toBe(50);
+        foreach ($names as $name) {
+            expect($name)
+                ->toMatch('/^vf[a-z0-9]+$/')
+                ->toStartWith('vfexampl')
+                ->and(strlen($name))->toBeLessThanOrEqual(32)
+                ->and(strlen($name))->toBe(16)
+                ->and(str_starts_with($name, 'test'))->toBeFalse()
+                ->and(is_numeric($name[0]))->toBeFalse();
+        }
+    });
+
+    test('generateUsername avoids empty or numeric-only domain slugs', function (): void {
+        $manager = buildOpenPanelManager();
+        $name = $manager->generateUsername('123.456');
+        expect($name)
+            ->toMatch('/^vf[a-z0-9]+$/')
+            ->and(strlen($name))->toBeGreaterThan(10);
+    });
 });
