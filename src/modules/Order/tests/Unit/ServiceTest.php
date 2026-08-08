@@ -1891,6 +1891,106 @@ test('createFromOrder activates the order after successful provisioning', functi
         ->and($order->getStatus())->toBe(Order::STATUS_ACTIVE);
 });
 
+test('createFromOrder syncs RedBean ClientOrder service_id before activate', function (): void {
+    // Regression: Doctrine persists service_id after action_create, but
+    // getLegacyOrder() returns the RedBean ClientOrder bean that was loaded
+    // during create without service_id. Activate then throws
+    // "Order N has no active service" until a force retry.
+    $order = createEntity(Order::class, [
+        'id' => 55,
+        'period' => '1M',
+        'productId' => 7,
+        'quantity' => 1,
+        'serviceType' => 'hosting',
+        'status' => Order::STATUS_PENDING_SETUP,
+    ]);
+
+    $staleLegacy = orderServiceCreateLegacyOrderModel(55);
+    $staleLegacy->service_id = null;
+    $staleLegacy->service_type = 'hosting';
+
+    $createdService = new class {
+        public function getId(): int
+        {
+            return 99;
+        }
+    };
+
+    $serviceRepo = new class {
+        public function action_create(): void
+        {
+        }
+    };
+    $mod = Mockery::mock();
+    $mod->shouldReceive('getService')->andReturn($serviceRepo);
+
+    $dbMock = Mockery::mock();
+    $dbMock->shouldReceive('load')->with('ClientOrder', 55)->andReturn($staleLegacy);
+
+    $orderRepoMock = Mockery::mock(OrderRepository::class)->shouldIgnoreMissing();
+    $emMock = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class)->shouldIgnoreMissing();
+    $emMock->shouldReceive('getRepository')->with(Order::class)->andReturn($orderRepoMock);
+    $emMock->shouldReceive('persist')->with($order)->atLeast()->once();
+    $emMock->shouldReceive('flush')->atLeast()->once();
+
+    $periodMock = Mockery::mock(Box_Period::class);
+    $periodMock->shouldReceive('getExpirationTime')->once()->andReturn(strtotime('+1 month'));
+
+    $productServiceMock = Mockery::mock();
+    $productServiceMock->shouldReceive('reduceStock')->once()->with(7, 1);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldAllowMockingProtectedMethods();
+    $serviceMock->shouldReceive('getOrderService')->once()->andReturn(null);
+    $serviceMock->shouldReceive('_callOnService')
+        ->once()
+        ->with($order, Order::ACTION_CREATE)
+        ->andReturn($createdService);
+    $serviceMock->shouldReceive('_callOnService')
+        ->once()
+        ->with($order, Order::ACTION_ACTIVATE)
+        ->andReturn(['username' => 'vfok']);
+    $serviceMock->shouldReceive('saveStatusChange')->once()->with($order, 'Order activated');
+
+    $di = container();
+    $di['em'] = $emMock;
+    $di['db'] = $dbMock;
+    $di['mod'] = $di->protect(fn (): Mockery\MockInterface => $mod);
+    $di['period'] = $di->protect(fn (): Mockery\MockInterface => $periodMock);
+    $di['mod_service'] = $di->protect(fn (): Mockery\MockInterface => $productServiceMock);
+    $serviceMock->setDi($di);
+
+    $result = $serviceMock->createFromOrder($order);
+
+    expect($result)->toBe(['username' => 'vfok'])
+        ->and($order->getServiceId())->toBe(99)
+        ->and((int) $staleLegacy->service_id)->toBe(99)
+        ->and($order->getStatus())->toBe(Order::STATUS_ACTIVE);
+});
+
+test('getLegacyOrder copies Doctrine service_id onto a stale RedBean bean', function (): void {
+    $order = createEntity(Order::class, [
+        'id' => 70,
+        'serviceId' => 42,
+        'serviceType' => 'hosting',
+    ]);
+    $staleLegacy = orderServiceCreateLegacyOrderModel(70);
+    $staleLegacy->service_id = null;
+
+    $dbMock = Mockery::mock();
+    $dbMock->shouldReceive('getExistingModelById')->once()->with('ClientOrder', 70)->andReturn($staleLegacy);
+
+    $svc = new Service();
+    $di = container();
+    $di['db'] = $dbMock;
+    $svc->setDi($di);
+
+    $legacy = $svc->getLegacyOrder($order);
+
+    expect($legacy)->toBe($staleLegacy)
+        ->and((int) $legacy->service_id)->toBe(42);
+});
+
 test('createFromOrder marks the order failed_setup when provisioning succeeds but activation bookkeeping fails', function (): void {
     // Regression test: the remote account is created successfully by
     // _callOnService(), but computing the new expiry date afterwards throws.

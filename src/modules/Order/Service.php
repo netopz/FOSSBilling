@@ -140,7 +140,16 @@ class Service implements InjectionAwareInterface
 
     private function orderServiceId(Order|\Model_ClientOrder $order): ?int
     {
-        return $order instanceof Order ? $order->getServiceId() : (int) $order->service_id;
+        if ($order instanceof Order) {
+            $serviceId = $order->getServiceId();
+
+            return ($serviceId !== null && (int) $serviceId > 0) ? (int) $serviceId : null;
+        }
+
+        // Cast carefully: (int) null === 0, and 0 is not a valid service_id.
+        $serviceId = (int) ($order->service_id ?? 0);
+
+        return $serviceId > 0 ? $serviceId : null;
     }
 
     private function orderServiceType(Order|\Model_ClientOrder $order): ?string
@@ -222,6 +231,25 @@ class Service implements InjectionAwareInterface
         $this->di['db']->store($order);
     }
 
+    /**
+     * Update the in-request RedBean ClientOrder bean after Doctrine (or a
+     * previous create path) persists client_order.service_id.
+     */
+    private function syncLegacyOrderServiceId(int $orderId, int $serviceId): void
+    {
+        if ($serviceId <= 0) {
+            return;
+        }
+
+        $legacyOrder = $this->di['db']->load('ClientOrder', $orderId);
+        if (!$legacyOrder instanceof \Model_ClientOrder && !is_object($legacyOrder)) {
+            return;
+        }
+
+        // RedBean may return either a boxed Model_ClientOrder or a raw bean.
+        $legacyOrder->service_id = $serviceId;
+    }
+
     public function getLegacyOrder(Order|\Model_ClientOrder $order): \Model_ClientOrder
     {
         if ($order instanceof \Model_ClientOrder) {
@@ -231,6 +259,13 @@ class Service implements InjectionAwareInterface
         $legacyOrder = $this->di['db']->getExistingModelById('ClientOrder', $this->orderId($order));
         if (!$legacyOrder instanceof \Model_ClientOrder) {
             throw new \FOSSBilling\Exception('Order compatibility model not found');
+        }
+
+        // If Doctrine already attached a service_id on this request, never
+        // hand activate a stale RedBean bean that still has an empty one.
+        $serviceId = $this->orderServiceId($order);
+        if ($serviceId !== null && (int) ($legacyOrder->service_id ?? 0) !== $serviceId) {
+            $legacyOrder->service_id = $serviceId;
         }
 
         return $legacyOrder;
@@ -1284,6 +1319,14 @@ class Service implements InjectionAwareInterface
                     $order->updated_at = date('Y-m-d H:i:s');
                 }
                 $this->persistOrder($order);
+
+                // Keep the RedBean ClientOrder identity cache in sync.
+                // action_create already loaded ClientOrder via getLegacyOrder()
+                // before service_id existed. Built-in activate paths call
+                // getLegacyOrder() again and would otherwise reuse that stale
+                // bean (service_id empty) → "Order N has no active service".
+                // A force retry later works because DB already has service_id.
+                $this->syncLegacyOrderServiceId($orderId, (int) $serviceId);
             }
         }
 
