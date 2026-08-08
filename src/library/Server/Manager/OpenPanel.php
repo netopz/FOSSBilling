@@ -416,8 +416,29 @@ public function testConnection(): bool
      */
     private function tryPublishDkimZone(string $domain): void
     {
+        $this->runPlutoHelper('vioflare-publish-dkim-zone', $domain, 'DKIM zone publish');
+    }
+
+    /**
+     * Best-effort: after DNS points at Pluto, hit https://domain to trigger
+     * Caddy AutoSSL (on_demand Let's Encrypt). Safe no-op when SSH/DNS unavailable.
+     */
+    public function tryIssueSsl(string $domain): void
+    {
+        $this->runPlutoHelper('vioflare-trigger-ssl', $domain, 'AutoSSL trigger');
+    }
+
+    /**
+     * Run an allow-listed helper on Pluto via the www-data DKIM SSH key /
+     * forced-command wrapper.
+     */
+    private function runPlutoHelper(string $helper, string $domain, string $label): void
+    {
         $domain = strtolower(trim($domain));
         if ($domain === '' || !preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/', $domain)) {
+            return;
+        }
+        if (!in_array($helper, ['vioflare-publish-dkim-zone', 'vioflare-trigger-ssl'], true)) {
             return;
         }
 
@@ -440,7 +461,7 @@ public function testConnection(): bool
             $keyPath = '/var/www/.ssh/id_ed25519_openpanel_dkim';
         }
         if (!is_readable($keyPath)) {
-            $this->getLog()->info('DKIM zone publish skipped for ' . $domain . ': SSH key not readable at ' . $keyPath);
+            $this->getLog()->info($label . ' skipped for ' . $domain . ': SSH key not readable at ' . $keyPath);
 
             return;
         }
@@ -448,12 +469,14 @@ public function testConnection(): bool
         $knownHosts = dirname($keyPath) . '/known_hosts';
         // Domain already validated to [a-z0-9.-]; do not quote-wrap (forced-command
         // wrappers see the literal SSH_ORIGINAL_COMMAND including quotes).
-        $remote = '/usr/local/bin/vioflare-publish-dkim-zone ' . $domain;
+        $remote = '/usr/local/bin/' . $helper . ' ' . $domain;
         $sshOpts = [
             '-i ' . escapeshellarg($keyPath),
             '-o IdentitiesOnly=yes',
             '-o BatchMode=yes',
+            // SSL trigger may wait on DNS + ACME.
             '-o ConnectTimeout=8',
+            '-o ServerAliveInterval=15',
             '-o StrictHostKeyChecking=accept-new',
         ];
         if (is_readable($knownHosts)) {
@@ -470,9 +493,9 @@ public function testConnection(): bool
         $code = 0;
         @exec($cmd, $output, $code);
         if ($code !== 0) {
-            $this->getLog()->info('DKIM zone publish helper skipped/failed for ' . $domain . ': ' . implode(' ', $output));
+            $this->getLog()->info($label . ' skipped/failed for ' . $domain . ': ' . implode(' ', $output));
         } else {
-            $this->getLog()->info('DKIM zone publish OK for ' . $domain . ': ' . implode(' ', $output));
+            $this->getLog()->info($label . ' OK for ' . $domain . ': ' . implode(' ', $output));
         }
     }
 

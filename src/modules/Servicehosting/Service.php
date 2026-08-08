@@ -1532,11 +1532,43 @@ class Service implements InjectionAwareInterface
             $this->di['logger']->info(
                 sprintf('Applied Synergy hosting DNS for %s → %s: %s', $domainName, $ipv4, json_encode($result))
             );
+
+            // After Synergy A/www records exist, ask OpenPanel to obtain AutoSSL
+            // (Caddy on_demand needs an https hit once DNS points at Pluto).
+            $this->tryIssueOpenPanelSsl($model, $domainName);
         } catch (\Throwable $e) {
             // Do not fail activation if DNS provider is unreachable or the domain
             // is not on Synergy DNS hosting; panel account already exists.
             $this->di['logger']->warning(
                 sprintf('Synergy hosting DNS apply failed for %s: %s', $domainName, $e->getMessage())
+            );
+        }
+    }
+
+    /**
+     * Best-effort AutoSSL trigger for OpenPanel hosting after DNS is applied.
+     */
+    private function tryIssueOpenPanelSsl(ServiceHosting $model, string $domainName): void
+    {
+        try {
+            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
+            if (!$server instanceof ServiceHostingServer) {
+                return;
+            }
+            if (strtolower((string) $server->getManager()) !== 'openpanel') {
+                return;
+            }
+            $manager = $this->getServerManager($server);
+            if (!$manager instanceof \Server_Manager_Openpanel) {
+                return;
+            }
+            if (!method_exists($manager, 'tryIssueSsl')) {
+                return;
+            }
+            $manager->tryIssueSsl($domainName);
+        } catch (\Throwable $e) {
+            $this->di['logger']->warning(
+                sprintf('OpenPanel AutoSSL trigger failed for %s: %s', $domainName, $e->getMessage())
             );
         }
     }
