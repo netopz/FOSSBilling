@@ -433,10 +433,16 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
     }
 
     /**
-     * Apply mail-related DNS: mail A, MX, SPF, optional DKIM, DMARC.
+     * Apply mail-related DNS: mail A, MX, SPF, optional DKIM, DMARC,
+     * plus client autodiscovery (autoconfig / autodiscover A + SRV).
      *
      * OpenPanel generates DKIM keys locally; pass the public TXT value via $dkimTxt
      * when available. Without $dkimTxt, MX/SPF/DMARC/mail A are still applied.
+     *
+     * Synergy SOA RNAME (hostmaster@domain) cannot be changed via API — locked by
+     * Synergy (“Unsupported record type” on SOA updates).
+     *
+     * SRV content format for Synergy: "weight port target." (priority via recordPrio).
      *
      * @return array<string, array{action: string, id: string|null}|null>
      */
@@ -452,8 +458,15 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         if (!str_ends_with($mxHost, '.')) {
             $mxHost .= '.';
         }
+        $mailHost = rtrim($mxHost, '.');
+        if (!str_contains($mailHost, '.')) {
+            $mailHost = 'mail.' . $domainName;
+        }
+        $mailTarget = $mailHost . '.';
+        $autodiscoverTarget = 'autodiscover.' . $domainName . '.';
+
         $spf = sprintf('v=spf1 ip4:%s ~all', $ipv4);
-        $dmarc = $dmarc ?: sprintf('v=DMARC1; p=none; rua=mailto:postmaster@%s', $domainName);
+        $dmarc = $dmarc ?: sprintf('v=DMARC1; p=none; rua=mailto:hostmaster@vioflare.com');
 
         $out = [
             'mail_a' => $this->upsertDnsRecord($domainName, 'mail', 'A', $ipv4),
@@ -461,6 +474,14 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
             'spf' => $this->upsertDnsRecord($domainName, '@', 'TXT', $spf, 3600, null, ['content_prefix' => 'v=spf1']),
             'dmarc' => $this->upsertDnsRecord($domainName, '_dmarc', 'TXT', $dmarc, 3600, null, ['content_prefix' => 'v=DMARC1']),
             'dkim' => null,
+            // Thunderbird / Apple Mail / Outlook discovery hostnames → Pluto
+            'autoconfig_a' => $this->upsertDnsRecord($domainName, 'autoconfig', 'A', $ipv4),
+            'autodiscover_a' => $this->upsertDnsRecord($domainName, 'autodiscover', 'A', $ipv4),
+            // RFC 6186 / common client SRV hints (Synergy: weight port target)
+            'srv_imaps' => $this->upsertDnsRecord($domainName, '_imaps._tcp', 'SRV', '1 993 ' . $mailTarget, 3600, 0),
+            'srv_submission' => $this->upsertDnsRecord($domainName, '_submission._tcp', 'SRV', '1 587 ' . $mailTarget, 3600, 0),
+            'srv_pop3s' => $this->upsertDnsRecord($domainName, '_pop3s._tcp', 'SRV', '1 995 ' . $mailTarget, 3600, 0),
+            'srv_autodiscover' => $this->upsertDnsRecord($domainName, '_autodiscover._tcp', 'SRV', '1 443 ' . $autodiscoverTarget, 3600, 0),
         ];
 
         if ($dkimTxt !== null && $dkimTxt !== '') {
