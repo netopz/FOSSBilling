@@ -250,10 +250,11 @@ describe('Registrar_Adapter_Synergy', function (): void {
             'status' => 'OK',
             'records' => [],
         ]);
-        // adds for apex A, www A, mail A, MX, SPF, DMARC, DKIM
+        // adds for apex A, www A, mail A, MX, SPF, DMARC, autoconfig A, autodiscover A, 4x SRV, DKIM
+        // (without ipv6 — baseline hosting apply)
         $client->shouldReceive('__soapCall')
             ->with('addDNSRecord', Mockery::type('array'))
-            ->times(7)
+            ->times(12)
             ->andReturn((object) ['status' => 'OK', 'id' => 'new']);
 
         $adapter = buildSynergyAdapter($client);
@@ -264,5 +265,27 @@ describe('Registrar_Adapter_Synergy', function (): void {
         expect($result['web'])->toHaveKeys(['apex_a', 'www_a'])
             ->and($result['mail'])->toHaveKeys(['mail_a', 'mx', 'spf', 'dmarc', 'dkim'])
             ->and($result['mail']['dkim']['action'])->toBe('added');
+    });
+
+    test('applyHostingDns publishes AAAA when ipv6 option is set', function (): void {
+        $client = Mockery::mock(SoapClient::class);
+        $client->shouldReceive('__soapCall')->with('listDNSZone', Mockery::type('array'))->andReturn((object) [
+            'status' => 'OK',
+            'records' => [],
+        ]);
+        // baseline 12 + apex/www/mail/autoconfig/autodiscover AAAA = 17
+        $client->shouldReceive('__soapCall')
+            ->with('addDNSRecord', Mockery::type('array'))
+            ->times(17)
+            ->andReturn((object) ['status' => 'OK', 'id' => 'new']);
+
+        $adapter = buildSynergyAdapter($client);
+        $result = $adapter->applyHostingDns('example-test.com.au', '173.249.33.154', [
+            'dkim_txt' => 'v=DKIM1; p=abc',
+            'ipv6' => '2a02:c207:3019:5586::1',
+        ]);
+
+        expect($result['web'])->toHaveKeys(['apex_a', 'www_a', 'apex_aaaa', 'www_aaaa'])
+            ->and($result['mail'])->toHaveKeys(['mail_aaaa', 'autoconfig_aaaa', 'autodiscover_aaaa']);
     });
 });

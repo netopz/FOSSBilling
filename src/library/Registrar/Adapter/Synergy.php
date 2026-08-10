@@ -416,25 +416,33 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
     }
 
     /**
-     * Apply standard web A records for hosting (@ and www → IPv4).
+     * Apply standard web A/AAAA records for hosting (@ and www).
      * Removes apex ALIAS records that would conflict with an A record.
      *
      * @return array<string, array{action: string, id: string|null}>
      */
-    public function applyWebDns(string $domainName, string $ipv4): array
+    public function applyWebDns(string $domainName, string $ipv4, ?string $ipv6 = null): array
     {
         $this->ensureDnsZone($domainName);
         $this->removeConflictingAlias($domainName);
 
-        return [
+        $out = [
             'apex_a' => $this->upsertDnsRecord($domainName, '@', 'A', $ipv4),
             'www_a' => $this->upsertDnsRecord($domainName, 'www', 'A', $ipv4),
         ];
+
+        if ($ipv6 !== null && $ipv6 !== '' && filter_var($ipv6, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $out['apex_aaaa'] = $this->upsertDnsRecord($domainName, '@', 'AAAA', $ipv6);
+            $out['www_aaaa'] = $this->upsertDnsRecord($domainName, 'www', 'AAAA', $ipv6);
+        }
+
+        return $out;
     }
 
     /**
      * Apply mail-related DNS: mail A, MX, SPF, optional DKIM, DMARC,
-     * plus client autodiscovery (autoconfig / autodiscover A + SRV).
+     * plus client autodiscovery (autoconfig / autodiscover A + SRV)
+     * and webmail A/AAAA (Roundcube catch-all on Pluto).
      *
      * OpenPanel generates DKIM keys locally; pass the public TXT value via $dkimTxt
      * when available. Without $dkimTxt, MX/SPF/DMARC/mail A are still applied.
@@ -452,6 +460,7 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         ?string $dkimTxt = null,
         ?string $mxHost = null,
         ?string $dmarc = null,
+        ?string $ipv6 = null,
     ): array {
         $this->ensureDnsZone($domainName);
         $mxHost = $mxHost ?: ('mail.' . $domainName . '.');
@@ -465,11 +474,15 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         $mailTarget = $mailHost . '.';
         $autodiscoverTarget = 'autodiscover.' . $domainName . '.';
 
-        $spf = sprintf('v=spf1 ip4:%s ~all', $ipv4);
+        $hasIpv6 = $ipv6 !== null && $ipv6 !== '' && (bool) filter_var($ipv6, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6);
+        $spf = $hasIpv6
+            ? sprintf('v=spf1 a mx ip4:%s ip6:%s ~all', $ipv4, $ipv6)
+            : sprintf('v=spf1 a mx ip4:%s ~all', $ipv4);
         $dmarc = $dmarc ?: sprintf('v=DMARC1; p=none; rua=mailto:hostmaster@vioflare.com');
 
         $out = [
             'mail_a' => $this->upsertDnsRecord($domainName, 'mail', 'A', $ipv4),
+            'webmail_a' => $this->upsertDnsRecord($domainName, 'webmail', 'A', $ipv4),
             'mx' => $this->upsertDnsRecord($domainName, '@', 'MX', $mxHost, 3600, 10, ['match_any_of_type' => true]),
             'spf' => $this->upsertDnsRecord($domainName, '@', 'TXT', $spf, 3600, null, ['content_prefix' => 'v=spf1']),
             'dmarc' => $this->upsertDnsRecord($domainName, '_dmarc', 'TXT', $dmarc, 3600, null, ['content_prefix' => 'v=DMARC1']),
@@ -483,6 +496,13 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
             'srv_pop3s' => $this->upsertDnsRecord($domainName, '_pop3s._tcp', 'SRV', '1 995 ' . $mailTarget, 3600, 0),
             'srv_autodiscover' => $this->upsertDnsRecord($domainName, '_autodiscover._tcp', 'SRV', '1 443 ' . $autodiscoverTarget, 3600, 0),
         ];
+
+        if ($hasIpv6) {
+            $out['mail_aaaa'] = $this->upsertDnsRecord($domainName, 'mail', 'AAAA', $ipv6);
+            $out['webmail_aaaa'] = $this->upsertDnsRecord($domainName, 'webmail', 'AAAA', $ipv6);
+            $out['autoconfig_aaaa'] = $this->upsertDnsRecord($domainName, 'autoconfig', 'AAAA', $ipv6);
+            $out['autodiscover_aaaa'] = $this->upsertDnsRecord($domainName, 'autodiscover', 'AAAA', $ipv6);
+        }
 
         if ($dkimTxt !== null && $dkimTxt !== '') {
             $out['dkim'] = $this->upsertDnsRecord(
@@ -502,20 +522,23 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
     /**
      * Apply web + mail DNS records for a hosting activation on Synergy DNS.
      *
-     * @param array{dkim_txt?: string, mx_host?: string, dmarc?: string} $options
+     * @param array{dkim_txt?: string, mx_host?: string, dmarc?: string, ipv6?: string} $options
      *
      * @return array{web: array, mail: array}
      */
     public function applyHostingDns(string $domainName, string $ipv4, array $options = []): array
     {
+        $ipv6 = isset($options['ipv6']) && is_string($options['ipv6']) ? $options['ipv6'] : null;
+
         return [
-            'web' => $this->applyWebDns($domainName, $ipv4),
+            'web' => $this->applyWebDns($domainName, $ipv4, $ipv6),
             'mail' => $this->applyMailDns(
                 $domainName,
                 $ipv4,
                 $options['dkim_txt'] ?? null,
                 $options['mx_host'] ?? null,
                 $options['dmarc'] ?? null,
+                $ipv6,
             ),
         ];
     }

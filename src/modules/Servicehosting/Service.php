@@ -1495,16 +1495,18 @@ class Service implements InjectionAwareInterface
             return;
         }
         $domainName = $sld . $tld;
+        $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
         $ipv4 = (string) ($model->getIp() ?: '');
-        if ($ipv4 === '') {
-            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
-            $ipv4 = $server instanceof ServiceHostingServer ? (string) ($server->getIp() ?: '') : '';
+        if ($ipv4 === '' && $server instanceof ServiceHostingServer) {
+            $ipv4 = (string) ($server->getIp() ?: '');
         }
         if ($ipv4 === '' || !filter_var($ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
             $this->di['logger']->warning(sprintf('Skipping Synergy DNS apply for %s: missing IPv4', $domainName));
 
             return;
         }
+
+        $ipv6 = $this->resolveServerIpv6($server instanceof ServiceHostingServer ? $server : null);
 
         try {
             /** @var \Box\Mod\Servicedomain\Service $domainService */
@@ -1519,6 +1521,9 @@ class Service implements InjectionAwareInterface
             }
 
             $options = [];
+            if ($ipv6 !== null) {
+                $options['ipv6'] = $ipv6;
+            }
             if (!empty($config['dkim_txt']) && is_string($config['dkim_txt'])) {
                 $options['dkim_txt'] = $config['dkim_txt'];
             } else {
@@ -1530,7 +1535,13 @@ class Service implements InjectionAwareInterface
 
             $result = $adapter->applyHostingDns($domainName, $ipv4, $options);
             $this->di['logger']->info(
-                sprintf('Applied Synergy hosting DNS for %s → %s: %s', $domainName, $ipv4, json_encode($result))
+                sprintf(
+                    'Applied Synergy hosting DNS for %s → %s%s: %s',
+                    $domainName,
+                    $ipv4,
+                    $ipv6 !== null ? (' / ' . $ipv6) : '',
+                    json_encode($result)
+                )
             );
 
             // After Synergy A/www records exist, ask OpenPanel to obtain AutoSSL
@@ -1543,6 +1554,32 @@ class Service implements InjectionAwareInterface
                 sprintf('Synergy hosting DNS apply failed for %s: %s', $domainName, $e->getMessage())
             );
         }
+    }
+
+    /**
+     * Prefer the first IPv6 listed on the hosting server's assigned_ips JSON.
+     */
+    private function resolveServerIpv6(?ServiceHostingServer $server): ?string
+    {
+        if (!$server instanceof ServiceHostingServer) {
+            return null;
+        }
+        $raw = (string) ($server->getAssignedIps() ?? '');
+        if ($raw === '') {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        $candidates = is_array($decoded)
+            ? $decoded
+            : preg_split('/[\s,]+/', $raw) ?: [];
+        foreach ($candidates as $ip) {
+            $ip = trim((string) $ip);
+            if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                return $ip;
+            }
+        }
+
+        return null;
     }
 
     /**
