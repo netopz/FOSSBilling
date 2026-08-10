@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace Box\Mod\Invoice\Api;
 
+use Box\Mod\Invoice\Entity\Invoice;
 use FOSSBilling\PaginationOptions;
 use FOSSBilling\Validation\Api\RequiredParams;
 
@@ -34,7 +35,10 @@ class Client extends \FOSSBilling\Api\AbstractApi
         $pager = $this->getDi()['pager']->getPaginatedResultSet($sql, $params, PaginationOptions::fromArray($data));
 
         foreach ($pager['list'] as $key => $item) {
-            $invoice = $this->getDi()['db']->getExistingModelById('Invoice', $item['id'], 'Invoice not found');
+            $invoice = $this->getDi()['em']->getRepository(Invoice::class)->find((int) $item['id']);
+            if (!$invoice instanceof Invoice) {
+                throw new \FOSSBilling\Exception('Invoice not found');
+            }
             $pager['list'][$key] = $this->getService()->toApiArray($invoice);
         }
 
@@ -52,8 +56,11 @@ class Client extends \FOSSBilling\Api\AbstractApi
     public function get($data)
     {
         $identity = $this->getIdentity();
-        $model = $this->getDi()['db']->findOne('Invoice', 'hash = :hash AND client_id = :client_id', ['hash' => $data['hash'], 'client_id' => $identity->id]);
-        if (!$model) {
+        $model = $this->getDi()['em']->getRepository(Invoice::class)->findOneBy([
+            'hash' => $data['hash'],
+            'clientId' => $identity->id,
+        ]);
+        if (!$model instanceof Invoice) {
             throw new \FOSSBilling\InformationException('Invoice was not found');
         }
 
@@ -78,10 +85,10 @@ class Client extends \FOSSBilling\Api\AbstractApi
         }
         $service = $this->getService();
         $invoice = $service->generateForOrder($model);
-        $service->approveInvoice($invoice, ['id' => $invoice->id, 'use_credits' => true]);
-        $this->getDi()['logger']->info('Generated new renewal invoice #%s', $invoice->id);
+        $service->approveInvoice($invoice, ['id' => $invoice->getId(), 'use_credits' => true]);
+        $this->getDi()['logger']->info('Generated new renewal invoice #%s', $invoice->getId());
 
-        return $invoice->hash;
+        return $invoice->getHash();
     }
 
     /**
@@ -99,10 +106,10 @@ class Client extends \FOSSBilling\Api\AbstractApi
 
         $service = $this->getService();
         $invoice = $service->generateFundsInvoice($this->getIdentity(), $data['amount']);
-        $service->approveInvoice($invoice, ['id' => $invoice->id]);
-        $this->getDi()['logger']->info('Generated add funds invoice #%s', $invoice->id);
+        $service->approveInvoice($invoice, ['id' => $invoice->getId()]);
+        $this->getDi()['logger']->info('Generated add funds invoice #%s', $invoice->getId());
 
-        return $invoice->hash;
+        return $invoice->getHash();
     }
 
     /**

@@ -9,6 +9,7 @@ declare(strict_types=1);
  * @license http://www.apache.org/licenses/LICENSE-2.0 Apache-2.0
  */
 
+use Box\Mod\Invoice\Entity\Invoice;
 use Box\Mod\Invoice\Entity\Subscription;
 use Box\Mod\Invoice\Entity\Transaction;
 use Stripe\StripeClient;
@@ -127,7 +128,10 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
     public function getHtml(FOSSBilling\Api\Proxy $api_admin, int $invoice_id, bool $subscription): string
     {
-        $invoiceModel = $this->di['db']->load('Invoice', $invoice_id);
+        $invoiceModel = $this->di['em']->getRepository(Invoice::class)->find($invoice_id);
+        if (!$invoiceModel instanceof Invoice) {
+            throw new FOSSBilling\Exception('Invoice not found');
+        }
 
         if ($subscription) {
             return $this->_generateSubscriptionForm($invoiceModel);
@@ -156,16 +160,16 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $this->stripe->subscriptions->update($subscriptionId, ['cancel_at_period_end' => true]);
     }
 
-    public function getAmountInCents(Model_Invoice $invoice): int
+    public function getAmountInCents(Invoice $invoice): int
     {
         return $this->getAmountInMinorUnits($invoice);
     }
 
-    public function getAmountInMinorUnits(Model_Invoice $invoice): int
+    public function getAmountInMinorUnits(Invoice $invoice): int
     {
         $invoiceService = $this->di['mod_service']('Invoice');
         $amount = $invoiceService->getTotalWithTax($invoice);
-        $multiplier = 10 ** $this->getCurrencyFractionDigits($invoice->currency);
+        $multiplier = 10 ** $this->getCurrencyFractionDigits($invoice->getCurrency());
 
         return (int) round($amount * $multiplier);
     }
@@ -184,9 +188,10 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         return Currencies::exists($currency) ? Currencies::getFractionDigits($currency) : 2;
     }
 
-    public function getInvoiceTitle(Model_Invoice $invoice): string
+    public function getInvoiceTitle(Invoice $invoice): string
     {
-        $invoiceNumber = $invoice->serie . sprintf('%05s', $invoice->nr);
+        // Production branding (keep over upstream generic title).
+        $invoiceNumber = $invoice->getSerie() . sprintf('%05s', $invoice->getNr());
 
         return 'Vioflare Networks - Invoice ' . $invoiceNumber;
     }
@@ -237,14 +242,18 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         }
     }
 
-    private function resolveInvoice(Transaction $tx, array $data): ?Model_Invoice
+    private function resolveInvoice(Transaction $tx, array $data): ?Invoice
     {
         if ($tx->getInvoiceId()) {
-            return $this->di['db']->getExistingModelById('Invoice', $tx->getInvoiceId());
+            return $this->di['em']->getRepository(Invoice::class)->find($tx->getInvoiceId());
         }
         if (isset($data['get']['invoice_id']) && $data['get']['invoice_id']) {
-            $invoice = $this->di['db']->getExistingModelById('Invoice', $data['get']['invoice_id']);
-            $tx->setInvoiceId((int) $invoice->id);
+            $invoice = $this->di['em']->getRepository(Invoice::class)->find((int) $data['get']['invoice_id']);
+            if (!$invoice instanceof Invoice) {
+                return null;
+            }
+
+            $tx->setInvoiceId((int) $invoice->getId());
 
             return $invoice;
         }
@@ -264,7 +273,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         return is_array($payload) && isset($payload['type']);
     }
 
-    private function processPaymentIntent(Transaction $tx, ?Model_Invoice $invoice, array $data): void
+    private function processPaymentIntent(Transaction $tx, ?Invoice $invoice, array $data): void
     {
         $charge = $this->stripe->paymentIntents->retrieve($data['get']['payment_intent'], []);
 
@@ -275,7 +284,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         );
     }
 
-    private function processPaymentIntentUnderLock(Transaction $tx, ?Model_Invoice $invoice, object $charge): void
+    private function processPaymentIntentUnderLock(Transaction $tx, ?Invoice $invoice, object $charge): void
     {
         $invoiceService = $this->di['mod_service']('Invoice');
 
@@ -307,9 +316,9 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             // Already-paid guard — prevents double-crediting when the
             // payment_intent.succeeded webhook processed the payment
             // before the redirect flow runs.
-            if ($invoice instanceof Model_Invoice) {
-                $fresh = $this->di['db']->findOne('Invoice', 'id = :id', [':id' => $invoice->id]);
-                if ($fresh instanceof Model_Invoice && $fresh->status === Model_Invoice::STATUS_PAID) {
+            if ($invoice instanceof Invoice) {
+                $fresh = $this->di['em']->getRepository(Invoice::class)->find($invoice->getId());
+                if ($fresh instanceof Invoice && $fresh->getStatus() === Invoice::STATUS_PAID) {
                     $tx->setStatus(Transaction::STATUS_PROCESSED);
                     $tx->setUpdatedAt(new DateTime());
                     $this->di['em']->flush();
@@ -336,7 +345,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         if ($charge->status == 'succeeded' && $tx->getStatus() === Transaction::STATUS_PROCESSING) {
             $clientService = $this->di['mod_service']('client');
             $client = $invoice
-                ? $this->di['db']->getExistingModelById('Client', $invoice->client_id)
+                ? $this->di['db']->getExistingModelById('Client', $invoice->getClientId())
                 : $this->getClientFromTransaction($tx, $charge);
 
             if ($invoice) {
@@ -361,7 +370,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             $clientService->addFunds($client, $bd['amount'], $bd['description'], $bd);
 
             if ($tx->getInvoiceId() && $invoice && !$invoiceService->isInvoiceTypeDeposit($invoice)) {
-                if (!$invoice->approved) {
+                if (!$invoice->isApproved()) {
                     $invoiceService->approveInvoice($invoice, ['use_credits' => false]);
                 }
                 $invoiceService->payInvoiceWithCredits($invoice);
@@ -390,14 +399,14 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $this->di['em']->flush();
     }
 
-    private function processSetupIntent($api_admin, Transaction $tx, ?Model_Invoice $invoice, array $data, int $gateway_id): void
+    private function processSetupIntent($api_admin, Transaction $tx, ?Invoice $invoice, array $data, int $gateway_id): void
     {
         $setupIntent = $this->stripe->setupIntents->retrieve($data['get']['setup_intent'], []);
 
         $tx->setTxnStatus($setupIntent->status);
         $tx->setTxnId($setupIntent->id);
 
-        if ($setupIntent->status === 'succeeded' && $invoice instanceof Model_Invoice) {
+        if ($setupIntent->status === 'succeeded' && $invoice instanceof Invoice) {
             $customer = $this->getOrCreateCustomer($invoice);
 
             try {
@@ -429,8 +438,8 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
             $tx->setSId($subscription->id);
             $tx->setSPeriod($this->getSubscriptionPeriodForInvoice($invoice));
-            $tx->setAmount((string) $this->getAmountFromMinorUnits($this->getAmountInCents($invoice), $invoice->currency));
-            $tx->setCurrency($invoice->currency);
+            $tx->setAmount((string) $this->getAmountFromMinorUnits($this->getAmountInCents($invoice), $invoice->getCurrency()));
+            $tx->setCurrency($invoice->getCurrency());
             $tx->setType(Payment_Transaction::TXTYPE_PAYMENT);
             $tx->setStatus(Transaction::STATUS_PROCESSED);
 
@@ -461,12 +470,12 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      * retrieves that invoice and applies the payment to FOSSBilling right
      * away, rather than waiting for the invoice.paid webhook to arrive.
      */
-    private function processInitialSubscriptionPayment($api_admin, Transaction $tx, Model_Invoice $invoice, Stripe\Subscription $subscription): void
+    private function processInitialSubscriptionPayment($api_admin, Transaction $tx, Invoice $invoice, Stripe\Subscription $subscription): void
     {
         // Already-paid guard — reload from DB to narrow the TOCTOU window when
         // the redirect flow and webhook handler race on the same subscription.
-        $fresh = $this->di['db']->findOne('Invoice', 'id = :id', [':id' => $invoice->id]);
-        if ($fresh instanceof Model_Invoice && $fresh->status === Model_Invoice::STATUS_PAID) {
+        $fresh = $this->di['em']->getRepository(Invoice::class)->find($invoice->getId());
+        if ($fresh instanceof Invoice && $fresh->getStatus() === Invoice::STATUS_PAID) {
             return;
         }
 
@@ -484,7 +493,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         }
 
         $bd = [
-            'id' => $invoice->client_id,
+            'id' => $invoice->getClientId(),
             'amount' => $this->getAmountFromMinorUnits(
                 (int) ($latestInvoice->amount_paid ?? 0),
                 (string) ($latestInvoice->currency ?? '')
@@ -498,7 +507,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
         $invoiceService = $this->di['mod_service']('Invoice');
         if (!$invoiceService->isInvoiceTypeDeposit($invoice)) {
-            if (!$invoice->approved) {
+            if (!$invoice->isApproved()) {
                 $invoiceService->approveInvoice($invoice, ['use_credits' => false]);
             }
             $invoiceService->payInvoiceWithCredits($invoice);
@@ -690,7 +699,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         // handleSetupIntentSucceededWebhook. This handler only serves as a
         // fallback if those flows didn't run (e.g. subscription created outside
         // FOSSBilling). Use the shared helper to avoid duplication.
-        $invoice = $this->di['db']->getExistingModelById('Invoice', (int) $invoiceId);
+        $invoice = $this->di['em']->getRepository(Invoice::class)->find((int) $invoiceId);
         $this->createOrUpdateSubscription($api_admin, $invoice, $stripeSubscription, $gateway_id);
 
         return false;
@@ -773,14 +782,14 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
         // Single DB fetch covers: (a) skip if already paid, (b) billing_reason fallback.
         if ($invoiceId) {
-            $existingInvoice = $this->di['db']->findOne('Invoice', 'id = :id', [':id' => (int) $invoiceId]);
-            if ($existingInvoice instanceof Model_Invoice) {
+            $existingInvoice = $this->di['em']->getRepository(Invoice::class)->find((int) $invoiceId);
+            if ($existingInvoice instanceof Invoice) {
                 // Skip if already paid — redirect flow may have processed it first.
-                if ($existingInvoice->status === Model_Invoice::STATUS_PAID) {
+                if ($existingInvoice->getStatus() === Invoice::STATUS_PAID) {
                     return false;
                 }
                 // Fallback: billing_reason inconclusive but original invoice still unpaid.
-                if (!$isInitialPayment && $existingInvoice->status === Model_Invoice::STATUS_UNPAID) {
+                if (!$isInitialPayment && $existingInvoice->getStatus() === Invoice::STATUS_UNPAID) {
                     $isInitialPayment = true;
                 }
             }
@@ -813,10 +822,10 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $invoiceService = $this->di['mod_service']('Invoice');
 
         if ($isInitialPayment && $invoiceId) {
-            $invoiceModel = $this->di['db']->getExistingModelById('Invoice', (int) $invoiceId);
+            $invoiceModel = $this->di['em']->getRepository(Invoice::class)->find((int) $invoiceId);
 
-            if (!$invoiceService->isInvoiceTypeDeposit($invoiceModel)) {
-                if (!$invoiceModel->approved) {
+            if ($invoiceModel instanceof Invoice && !$invoiceService->isInvoiceTypeDeposit($invoiceModel)) {
+                if (!$invoiceModel->isApproved()) {
                     $invoiceService->approveInvoice($invoiceModel, ['use_credits' => false]);
                 }
                 $invoiceService->payInvoiceWithCredits($invoiceModel);
@@ -827,8 +836,8 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
                 (int) $clientId
             );
 
-            if ($renewalInvoice instanceof Model_Invoice) {
-                $tx->setInvoiceId((int) $renewalInvoice->id);
+            if ($renewalInvoice instanceof Invoice) {
+                $tx->setInvoiceId((int) $renewalInvoice->getId());
                 if (!$invoiceService->isInvoiceTypeDeposit($renewalInvoice)) {
                     $invoiceService->payInvoiceWithCredits($renewalInvoice);
                 }
@@ -932,7 +941,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             return false;
         }
 
-        $invoice = $invoiceId ? $this->di['db']->getExistingModelById('Invoice', (int) $invoiceId) : null;
+        $invoice = $invoiceId ? $this->di['em']->getRepository(Invoice::class)->find((int) $invoiceId) : null;
 
         // Delegate to the shared payment processing logic
         $this->applyOneTimePayment($tx, $invoice, $paymentIntent);
@@ -1017,7 +1026,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $tx->setInvoiceId((int) $invoiceId);
         $this->di['em']->flush();
 
-        $invoice = $this->di['db']->getExistingModelById('Invoice', (int) $invoiceId);
+        $invoice = $this->di['em']->getRepository(Invoice::class)->find((int) $invoiceId);
         $customer = $this->getOrCreateCustomer($invoice);
 
         // createStripeSubscription uses an idempotency key based on the
@@ -1043,8 +1052,8 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
         $tx->setSId($subscription->id);
         $tx->setSPeriod($this->getSubscriptionPeriodForInvoice($invoice));
-        $tx->setAmount((string) $this->getAmountFromMinorUnits($this->getAmountInCents($invoice), $invoice->currency));
-        $tx->setCurrency($invoice->currency);
+        $tx->setAmount((string) $this->getAmountFromMinorUnits($this->getAmountInCents($invoice), $invoice->getCurrency()));
+        $tx->setCurrency($invoice->getCurrency());
         $tx->setType(Payment_Transaction::TXTYPE_PAYMENT);
         $tx->setUpdatedAt(new DateTime());
         $this->di['em']->flush();
@@ -1076,7 +1085,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      * appears immediately, without depending on the customer.subscription.created
      * webhook event.
      */
-    private function createOrUpdateSubscription($api_admin, Model_Invoice $invoice, object $subscription, int $gateway_id): void
+    private function createOrUpdateSubscription($api_admin, Invoice $invoice, object $subscription, int $gateway_id): void
     {
         $existing = $this->di['em']->getRepository(Subscription::class)->findOneBy(['sid' => $subscription->id]);
         if ($existing instanceof Subscription) {
@@ -1084,15 +1093,15 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         }
 
         $sd = [
-            'client_id' => $invoice->client_id,
+            'client_id' => $invoice->getClientId(),
             'gateway_id' => $gateway_id,
-            'currency' => strtoupper($invoice->currency),
+            'currency' => strtoupper($invoice->getCurrency()),
             'sid' => $subscription->id,
             'status' => 'active',
             'period' => $this->getSubscriptionPeriodForInvoice($invoice),
-            'amount' => $this->getAmountFromMinorUnits($this->getAmountInCents($invoice), $invoice->currency),
+            'amount' => $this->getAmountFromMinorUnits($this->getAmountInCents($invoice), $invoice->getCurrency()),
             'rel_type' => 'invoice',
-            'rel_id' => $invoice->id,
+            'rel_id' => $invoice->getId(),
         ];
 
         try {
@@ -1109,21 +1118,21 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      * invoice. Used by both the redirect flow (processPaymentIntent) and the
      * payment_intent.succeeded webhook handler.
      */
-    private function applyOneTimePayment(Transaction $tx, ?Model_Invoice $invoice, object $charge): void
+    private function applyOneTimePayment(Transaction $tx, ?Invoice $invoice, object $charge): void
     {
         // Reload the invoice from the database to get the freshest status.
         // This narrows the TOCTOU race window when the redirect flow and
         // webhook process the same payment concurrently.
-        if ($invoice instanceof Model_Invoice) {
-            $fresh = $this->di['db']->findOne('Invoice', 'id = :id', [':id' => $invoice->id]);
-            if ($fresh instanceof Model_Invoice) {
+        if ($invoice instanceof Invoice) {
+            $fresh = $this->di['em']->getRepository(Invoice::class)->find($invoice->getId());
+            if ($fresh instanceof Invoice) {
                 $invoice = $fresh;
             }
         }
 
         // Skip if the invoice is already paid — prevents double-crediting
         // when the webhook arrives after the redirect flow.
-        if ($invoice instanceof Model_Invoice && $invoice->status === Model_Invoice::STATUS_PAID) {
+        if ($invoice instanceof Invoice && $invoice->getStatus() === Invoice::STATUS_PAID) {
             return;
         }
 
@@ -1138,7 +1147,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
 
         $clientService = $this->di['mod_service']('client');
         $client = $invoice
-            ? $this->di['db']->getExistingModelById('Client', $invoice->client_id)
+            ? $this->di['db']->getExistingModelById('Client', $invoice->getClientId())
             : $this->getClientFromTransaction($tx, $charge);
 
         if ($invoice) {
@@ -1170,7 +1179,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $clientService->addFunds($client, $bd['amount'], $bd['description'], $bd);
 
         if ($tx->getInvoiceId() && $invoice && !$invoiceService->isInvoiceTypeDeposit($invoice)) {
-            if (!$invoice->approved) {
+            if (!$invoice->isApproved()) {
                 $invoiceService->approveInvoice($invoice, ['use_credits' => false]);
             }
             $invoiceService->payInvoiceWithCredits($invoice);
@@ -1247,9 +1256,9 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         return str_replace(['\\', '\''], ['\\\\', '\\\''], $value);
     }
 
-    private function getOrCreateCustomer(Model_Invoice $invoice): Stripe\Customer
+    private function getOrCreateCustomer(Invoice $invoice): Stripe\Customer
     {
-        $validatedEmail = filter_var($invoice->buyer_email, FILTER_VALIDATE_EMAIL);
+        $validatedEmail = filter_var($invoice->getBuyerEmail(), FILTER_VALIDATE_EMAIL);
 
         if ($validatedEmail !== false) {
             $customers = $this->stripe->customers->search([
@@ -1265,19 +1274,19 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         }
 
         return $this->stripe->customers->create([
-            'email' => $invoice->buyer_email,
-            'name' => trim($invoice->buyer_first_name . ' ' . $invoice->buyer_last_name),
+            'email' => $invoice->getBuyerEmail(),
+            'name' => trim($invoice->getBuyerFirstName() . ' ' . $invoice->getBuyerLastName()),
             'address' => [
-                'line1' => $invoice->buyer_address,
-                'city' => $invoice->buyer_city,
-                'state' => $invoice->buyer_state,
-                'postal_code' => $invoice->buyer_zip,
-                'country' => $invoice->buyer_country,
+                'line1' => $invoice->getBuyerAddress(),
+                'city' => $invoice->getBuyerCity(),
+                'state' => $invoice->getBuyerState(),
+                'postal_code' => $invoice->getBuyerZip(),
+                'country' => $invoice->getBuyerCountry(),
             ],
         ]);
     }
 
-    private function createStripeSubscription(Stripe\Customer $customer, Stripe\SetupIntent $setupIntent, Model_Invoice $invoice): Stripe\Subscription
+    private function createStripeSubscription(Stripe\Customer $customer, Stripe\SetupIntent $setupIntent, Invoice $invoice): Stripe\Subscription
     {
         $product = $this->getOrCreateProduct($invoice);
         $price = $this->getOrCreatePrice($product, $invoice);
@@ -1290,22 +1299,22 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             'default_payment_method' => $setupIntent->payment_method,
             'description' => $this->getInvoiceTitle($invoice),
             'metadata' => [
-                'invoice_id' => $invoice->id,
-                'client_id' => $invoice->client_id,
+                'invoice_id' => (string) $invoice->getId(),
+                'client_id' => (string) $invoice->getClientId(),
                 'gateway_id' => (string) $this->config['gateway_id'],
             ],
-        ], ['idempotency_key' => 'sub_invoice_' . $invoice->id]);
+        ], ['idempotency_key' => 'sub_invoice_' . $invoice->getId()]);
     }
 
-    private function getOrCreateProduct(Model_Invoice $invoice): Stripe\Product
+    private function getOrCreateProduct(Invoice $invoice): Stripe\Product
     {
         $invoiceItems = $this->di['db']->getAll(
             'SELECT title FROM invoice_item WHERE invoice_id = :invoice_id',
-            [':invoice_id' => $invoice->id]
+            [':invoice_id' => $invoice->getId()]
         );
 
         if (empty($invoiceItems)) {
-            throw new RuntimeException('No invoice items found for invoice ID: ' . $invoice->id);
+            throw new RuntimeException('No invoice items found for invoice ID: ' . $invoice->getId());
         }
 
         $productName = $invoiceItems[0]['title'];
@@ -1325,10 +1334,10 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         ]);
     }
 
-    private function getOrCreatePrice(Stripe\Product $product, Model_Invoice $invoice): Stripe\Price
+    private function getOrCreatePrice(Stripe\Product $product, Invoice $invoice): Stripe\Price
     {
         $amount = $this->getAmountInCents($invoice);
-        $currency = strtolower($invoice->currency);
+        $currency = strtolower($invoice->getCurrency());
         $recurring = $this->getStripeRecurringParams(
             $this->getSubscriptionPeriodForInvoice($invoice)
         );
@@ -1358,7 +1367,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         ]);
     }
 
-    private function getSubscriptionPeriodForInvoice(Model_Invoice $invoice): string
+    private function getSubscriptionPeriodForInvoice(Invoice $invoice): string
     {
         $subscriptionService = $this->di['mod_service']('Invoice', 'Subscription');
         $period = $subscriptionService->getSubscriptionPeriod($invoice);
@@ -1435,23 +1444,23 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      *
      * @return array{0: array, 1: string}
      */
-    private function _oneTimeIntentParams(Model_Invoice $invoice): array
+    private function _oneTimeIntentParams(Invoice $invoice): array
     {
         $intentParams = [
             'amount' => $this->getAmountInMinorUnits($invoice),
-            'currency' => strtolower($invoice->currency),
+            'currency' => strtolower((string) $invoice->getCurrency()),
             'description' => $this->getInvoiceTitle($invoice),
             'automatic_payment_methods' => ['enabled' => true],
-            'receipt_email' => $invoice->buyer_email,
+            'receipt_email' => $invoice->getBuyerEmail(),
             'metadata' => [
-                'client_id' => (string) $invoice->client_id,
-                'invoice_id' => (string) $invoice->id,
+                'client_id' => (string) $invoice->getClientId(),
+                'invoice_id' => (string) $invoice->getId(),
                 'gateway_id' => (string) $this->config['gateway_id'],
             ],
         ];
         $idempotencyKey = sprintf(
             'one_time_invoice_%d_gateway_%d_%s',
-            $invoice->id,
+            $invoice->getId(),
             $this->config['gateway_id'],
             hash('sha256', json_encode($intentParams, JSON_THROW_ON_ERROR))
         );
@@ -1477,7 +1486,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      *
      * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int, already_paid?: bool, payment_intent_id?: string}
      */
-    public function createInvoicePaymentIntent(Model_Invoice $invoice): array
+    public function createInvoicePaymentIntent(Invoice $invoice): array
     {
         [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice);
         $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
@@ -1538,17 +1547,9 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             return false;
         }
 
-        $existing = $this->di['db']->findOne(
-            'Transaction',
-            'txn_id = :txn_id AND gateway_id = :gateway_id AND status IN (:s1, :s2)',
-            [
-                ':txn_id' => $paymentIntent->id,
-                ':gateway_id' => $gateway_id,
-                ':s1' => Model_Transaction::STATUS_PROCESSING,
-                ':s2' => Model_Transaction::STATUS_PROCESSED,
-            ]
-        );
-        if ($existing instanceof Model_Transaction) {
+        $existing = $this->di['em']->getRepository(Transaction::class)
+            ->findProcessingOrProcessedByTxnId((string) $paymentIntent->id, $gateway_id);
+        if ($existing instanceof Transaction) {
             return true;
         }
 
@@ -1559,32 +1560,31 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         }
 
         $invoice = $invoiceId
-            ? $this->di['db']->findOne('Invoice', 'id = :id', [':id' => (int) $invoiceId])
+            ? $this->di['em']->getRepository(Invoice::class)->find((int) $invoiceId)
             : null;
 
-        if ($invoice instanceof Model_Invoice && $invoice->status === Model_Invoice::STATUS_PAID) {
+        if ($invoice instanceof Invoice && $invoice->getStatus() === Invoice::STATUS_PAID) {
             return true;
         }
 
-        $tx = $this->di['db']->dispense('Transaction');
-        $tx->invoice_id = $invoiceId ? (int) $invoiceId : null;
-        $tx->gateway_id = $gateway_id;
-        $tx->txn_id = $paymentIntent->id;
-        $tx->txn_status = $paymentIntent->status;
-        $tx->amount = $this->getAmountFromMinorUnits($paymentIntent->amount, $paymentIntent->currency);
-        $tx->currency = $paymentIntent->currency;
-        $tx->type = Payment_Transaction::TXTYPE_PAYMENT;
-        $tx->status = Model_Transaction::STATUS_RECEIVED;
-        $tx->created_at = date('Y-m-d H:i:s');
-        $tx->updated_at = date('Y-m-d H:i:s');
-        $this->di['db']->store($tx);
+        $tx = new Transaction();
+        $tx->setInvoiceId($invoiceId ? (int) $invoiceId : null);
+        $tx->setGatewayId($gateway_id);
+        $tx->setTxnId((string) $paymentIntent->id);
+        $tx->setTxnStatus((string) $paymentIntent->status);
+        $tx->setAmount((string) $this->getAmountFromMinorUnits((int) $paymentIntent->amount, (string) $paymentIntent->currency));
+        $tx->setCurrency((string) $paymentIntent->currency);
+        $tx->setType(Payment_Transaction::TXTYPE_PAYMENT);
+        $tx->setStatus(Transaction::STATUS_RECEIVED);
+        $this->di['em']->persist($tx);
+        $this->di['em']->flush();
 
-        $this->applyOneTimePayment($tx, $invoice instanceof Model_Invoice ? $invoice : null, $paymentIntent);
+        $this->applyOneTimePayment($tx, $invoice instanceof Invoice ? $invoice : null, $paymentIntent);
 
         return true;
     }
 
-    protected function _generateForm(Model_Invoice $invoice): string
+    protected function _generateForm(Invoice $invoice): string
     {
         [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice);
         $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
@@ -1658,16 +1658,16 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $bindings = [
             ':pub_key' => $pubKey,
             ':intent_secret' => $intent->client_secret,
-            ':buyer_email' => htmlspecialchars((string) $invoice->buyer_email, ENT_QUOTES, 'UTF-8'),
-            ':buyer_name' => htmlspecialchars(trim($invoice->buyer_first_name . ' ' . $invoice->buyer_last_name), ENT_QUOTES, 'UTF-8'),
+            ':buyer_email' => htmlspecialchars((string) $invoice->getBuyerEmail(), ENT_QUOTES, 'UTF-8'),
+            ':buyer_name' => htmlspecialchars(trim($invoice->getBuyerFirstName() . ' ' . $invoice->getBuyerLastName()), ENT_QUOTES, 'UTF-8'),
             ':callbackUrl' => $this->config['notify_url'],
-            ':invoice_hash' => $invoice->hash,
+            ':invoice_hash' => $invoice->getHash(),
         ];
 
         return strtr($form, $bindings);
     }
 
-    protected function _generateSubscriptionForm(Model_Invoice $invoice): string
+    protected function _generateSubscriptionForm(Invoice $invoice): string
     {
         $customer = $this->getOrCreateCustomer($invoice);
         $product = $this->getOrCreateProduct($invoice);
@@ -1678,7 +1678,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             'payment_method_types' => ['card'],
             'usage' => 'off_session',
             'metadata' => [
-                'invoice_id' => $invoice->id,
+                'invoice_id' => (string) $invoice->getId(),
                 'price_id' => $price->id,
                 'gateway_id' => (string) $this->config['gateway_id'],
             ],
@@ -1742,10 +1742,10 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
         $bindings = [
             ':pub_key' => $pubKey,
             ':setup_intent_secret' => $setupIntent->client_secret,
-            ':buyer_email' => htmlspecialchars($invoice->buyer_email ?? '', ENT_QUOTES, 'UTF-8'),
-            ':buyer_name' => htmlspecialchars(trim($invoice->buyer_first_name . ' ' . $invoice->buyer_last_name), ENT_QUOTES, 'UTF-8'),
+            ':buyer_email' => htmlspecialchars($invoice->getBuyerEmail() ?? '', ENT_QUOTES, 'UTF-8'),
+            ':buyer_name' => htmlspecialchars(trim($invoice->getBuyerFirstName() . ' ' . $invoice->getBuyerLastName()), ENT_QUOTES, 'UTF-8'),
             ':callbackUrl' => $this->config['notify_url'],
-            ':invoice_hash' => $invoice->hash,
+            ':invoice_hash' => $invoice->getHash(),
         ];
 
         return strtr($form, $bindings);

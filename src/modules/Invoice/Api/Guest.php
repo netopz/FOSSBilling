@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace Box\Mod\Invoice\Api;
 
+use Box\Mod\Invoice\Entity\Invoice;
 use Box\Mod\Invoice\InvoiceOperation;
 use FOSSBilling\Validation\Api\RequiredParams;
 
@@ -37,8 +38,8 @@ class Guest extends \FOSSBilling\Api\AbstractApi
         $this->getDi()['rate_limiter']->consumeOrThrow('invoice_get_ip', (string) $this->getIp());
         $this->getDi()['rate_limiter']->consumeOrThrow('invoice_get_hash', (string) $data['hash']);
 
-        $model = $this->getDi()['db']->findOne('Invoice', 'hash = :hash', ['hash' => $data['hash']]);
-        if (!$model) {
+        $model = $this->getDi()['em']->getRepository(Invoice::class)->findByHash((string) $data['hash']);
+        if (!$model instanceof Invoice) {
             throw new \FOSSBilling\InformationException('Invoice was not found');
         }
         $service = $this->getService();
@@ -93,6 +94,14 @@ class Guest extends \FOSSBilling\Api\AbstractApi
         $this->getDi()['rate_limiter']->consumeOrThrow('invoice_payment_hash', (string) $data['hash']);
 
         return $this->getService()->processInvoice($data);
+    }
+
+    /**
+     * Get whether the client add funds feature is enabled, or not.
+     */
+    public function funds_enabled(): bool
+    {
+        return $this->getService()->isFundsEnabled();
     }
 
     /**

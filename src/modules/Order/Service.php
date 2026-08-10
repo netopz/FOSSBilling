@@ -13,6 +13,7 @@ namespace Box\Mod\Order;
 
 use Box\Mod\Client\Entity\Client as ClientEntity;
 use Box\Mod\Currency\Entity\Currency;
+use Box\Mod\Invoice\Entity\Invoice;
 use Box\Mod\Order\Entity\Order;
 use Box\Mod\Order\Entity\OrderMeta;
 use Box\Mod\Order\Entity\OrderStatus;
@@ -355,7 +356,7 @@ class Service implements InjectionAwareInterface
             if (!$order instanceof Order) {
                 throw new \FOSSBilling\Exception('Order not found');
             }
-            $identity = $di['loggedin_admin'];
+            $identity = $di['loggedin_admin'] ?? null;
             $service = $orderService->getOrderServiceData($order, $identity);
             $orderArr = $orderService->toApiArray($order, true, $identity);
 
@@ -384,7 +385,7 @@ class Service implements InjectionAwareInterface
             if (!$order instanceof Order) {
                 throw new \FOSSBilling\Exception('Order not found');
             }
-            $identity = $di['loggedin_admin'];
+            $identity = $di['loggedin_admin'] ?? null;
             $s = $service->getOrderServiceData($order, $identity);
             $orderArr = $service->toApiArray($order, true, $identity);
 
@@ -413,7 +414,7 @@ class Service implements InjectionAwareInterface
             if (!$order instanceof Order) {
                 throw new \FOSSBilling\Exception('Order not found');
             }
-            $identity = $di['loggedin_admin'];
+            $identity = $di['loggedin_admin'] ?? null;
             $s = $service->getOrderServiceData($order, $identity);
             $orderArr = $service->toApiArray($order, true, $identity);
 
@@ -442,7 +443,7 @@ class Service implements InjectionAwareInterface
             if (!$order instanceof Order) {
                 throw new \FOSSBilling\Exception('Order not found');
             }
-            $identity = $di['loggedin_admin'];
+            $identity = $di['loggedin_admin'] ?? null;
             $orderArr = $service->toApiArray($order, true, $identity);
 
             $email = [];
@@ -469,7 +470,7 @@ class Service implements InjectionAwareInterface
             if (!$order instanceof Order) {
                 throw new \FOSSBilling\Exception('Order not found');
             }
-            $identity = $di['loggedin_admin'];
+            $identity = $di['loggedin_admin'] ?? null;
             $s = $service->getOrderServiceData($order, $identity);
             $orderArr = $service->toApiArray($order, true, $identity);
 
@@ -667,11 +668,11 @@ class Service implements InjectionAwareInterface
         $query .= ' HAVING DATEDIFF(co.expires_at, NOW()) <= :days_until_expiration ORDER BY co.client_id DESC';
         $bindings['status'] = Order::STATUS_ACTIVE;
         $bindings['invoice_option'] = 'issue-invoice';
-        $bindings['unpaid_invoice_status'] = \Model_Invoice::STATUS_UNPAID;
+        $bindings['unpaid_invoice_status'] = Invoice::STATUS_UNPAID;
         $bindings['pending_item_type'] = \Box\Mod\Invoice\Entity\InvoiceItem::TYPE_ORDER;
         $bindings['pending_item_task'] = \Box\Mod\Invoice\Entity\InvoiceItem::TASK_RENEW;
         $bindings['pending_item_status'] = \Box\Mod\Invoice\Entity\InvoiceItem::STATUS_EXECUTED;
-        $bindings['pending_invoice_status'] = \Model_Invoice::STATUS_PAID;
+        $bindings['pending_invoice_status'] = Invoice::STATUS_PAID;
         $bindings['days_until_expiration'] = $days_until_expiration;
 
         return [$query, $bindings];
@@ -1166,11 +1167,11 @@ class Service implements InjectionAwareInterface
             return $orderId;
         });
 
-        if ($invoice instanceof \Model_Invoice) {
+        if ($invoice instanceof Invoice) {
             $invoiceService = $this->di['mod_service']('invoice');
 
             try {
-                $invoiceService->approveInvoice($invoice, ['id' => $invoice->id, 'use_credits' => true]);
+                $invoiceService->approveInvoice($invoice, ['id' => $invoice->getId(), 'use_credits' => true]);
 
                 if ($markInvoicePaid) {
                     $invoiceService->markAsPaidByAdmin($invoice, $data);
@@ -2375,13 +2376,13 @@ class Service implements InjectionAwareInterface
         return (float) $price * (int) $quantity;
     }
 
-    public function setUnpaidInvoice(Order|\Model_ClientOrder $order, \Model_Invoice $proforma): void
+    public function setUnpaidInvoice(Order|\Model_ClientOrder $order, Invoice $proforma): void
     {
         if ($order instanceof Order) {
-            $order->setUnpaidInvoiceId((int) $proforma->id);
+            $order->setUnpaidInvoiceId((int) $proforma->getId());
             $order->setUpdatedAt(new \DateTime());
         } else {
-            $order->unpaid_invoice_id = (int) $proforma->id;
+            $order->unpaid_invoice_id = (int) $proforma->getId();
             $order->updated_at = date('Y-m-d H:i:s');
         }
         $this->persistOrder($order);

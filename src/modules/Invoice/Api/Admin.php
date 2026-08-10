@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace Box\Mod\Invoice\Api;
 
+use Box\Mod\Invoice\Entity\Invoice;
 use Box\Mod\Invoice\Entity\PayGateway;
 use Box\Mod\Invoice\Entity\Subscription;
 use Box\Mod\Invoice\Entity\Tax;
@@ -49,7 +50,10 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         }
 
         foreach ($pager['list'] as $key => $item) {
-            $invoice = $this->getDi()['db']->getExistingModelById('Invoice', $item['id'], 'Invoice not found');
+            $invoice = $this->getDi()['em']->getRepository(Invoice::class)->find((int) $item['id']);
+            if (!$invoice instanceof Invoice) {
+                throw new \FOSSBilling\Exception('Invoice not found');
+            }
             $pager['list'][$key] = $service->toApiArray($invoice, true, $this->getIdentity());
         }
 
@@ -162,7 +166,7 @@ class Admin extends \FOSSBilling\Api\AbstractApi
 
         $invoice = $this->getService()->prepareInvoice($client, $data);
 
-        return $invoice->id;
+        return $invoice->getId();
     }
 
     /**
@@ -1094,9 +1098,14 @@ class Admin extends \FOSSBilling\Api\AbstractApi
     }
 
     #[RequiredParams(['id' => 'Invoice ID was not passed'])]
-    private function _getInvoice($data)
+    private function _getInvoice($data): Invoice
     {
-        return $this->getDi()['db']->getExistingModelById('Invoice', $data['id'], 'Invoice was not found');
+        $invoice = $this->getDi()['em']->getRepository(Invoice::class)->find((int) $data['id']);
+        if (!$invoice instanceof Invoice) {
+            throw new \FOSSBilling\Exception('Invoice was not found');
+        }
+
+        return $invoice;
     }
 
     /**
