@@ -1571,7 +1571,7 @@ class Service implements InjectionAwareInterface
         $decoded = json_decode($raw, true);
         $candidates = is_array($decoded)
             ? $decoded
-            : preg_split('/[\s,]+/', $raw) ?: [];
+            : (preg_split('/[\s,]+/', $raw) ?: []);
         foreach ($candidates as $ip) {
             $ip = trim((string) $ip);
             if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
