@@ -343,7 +343,11 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
                 $expected = $invoiceService->getTotalWithTax($invoice);
 
                 try {
-                    $invoiceService->validatePaymentAmount($tx->getAmount(), $expected);
+                    // LOCAL PATCH: cast string amount — see LOCAL_PATCHES.md (stripe-validatePaymentAmount-float).
+                    // Transaction::getAmount() returns ?string; validatePaymentAmount() requires float.
+                    // Under declare(strict_types=1) this TypeError left Stripe-paid invoices unpaid.
+                    // Drop when upstream FOSSBilling casts this (PayPal already uses (float)).
+                    $invoiceService->validatePaymentAmount((float) $tx->getAmount(), $expected);
                 } catch (FOSSBilling\Exception $e) {
                     $tx->setStatus(Transaction::STATUS_ERROR);
                     $tx->setError($e->getMessage());
@@ -1141,7 +1145,11 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             $expected = $invoiceService->getTotalWithTax($invoice);
 
             try {
-                $invoiceService->validatePaymentAmount($tx->getAmount(), $expected);
+                // LOCAL PATCH: cast string amount — see LOCAL_PATCHES.md (stripe-validatePaymentAmount-float).
+                // Transaction::getAmount() returns ?string; validatePaymentAmount() requires float.
+                // Under declare(strict_types=1) this TypeError left Stripe-paid invoices unpaid.
+                // Drop when upstream FOSSBilling casts this (PayPal already uses (float)).
+                $invoiceService->validatePaymentAmount((float) $tx->getAmount(), $expected);
             } catch (FOSSBilling\Exception $e) {
                 $tx->setStatus(Transaction::STATUS_ERROR);
                 $tx->setError($e->getMessage());
