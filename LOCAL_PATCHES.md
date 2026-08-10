@@ -36,6 +36,14 @@ Track divergences from [FOSSBilling/FOSSBilling](https://github.com/FOSSBilling/
 | **Notes** | Keep Vioflare invoice title branding; keep headless SPA helpers (`createInvoicePaymentIntent`, reconcile helpers, `_oneTimeIntentParams`) adapted to Doctrine `Invoice`/`Transaction` |
 | **Files** | `src/library/Payment/Adapter/Stripe.php`, `src/modules/Invoice/Service.php` SPA methods, `src/modules/Invoice/Api/Admin.php` stripe_* endpoints |
 
+### cloudflare-dns-provider
+
+| | |
+| --- | --- |
+| **Status** | Active (intentional product fork) |
+| **Notes** | Synergy stays registrar; Cloudflare DNS adapter for zones/records/proxy. Domain activate → CF zone + Synergy NS; hosting activate → CF `applyHostingDns` (orange web, grey mail). Config key `cloudflare_dns`. Docs: `fossbilling-docs/cloudflare-dns.md` |
+| **Files** | `src/library/Dns/Adapter/Cloudflare.php`, `Servicedomain/Service.php`, `Servicedomain/Api/Admin.php`, `Servicehosting/Service.php`, `config-sample.php` |
+
 ## Resolved
 
 _(none yet)_

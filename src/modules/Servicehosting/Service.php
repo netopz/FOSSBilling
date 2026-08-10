@@ -222,9 +222,9 @@ class Service implements InjectionAwareInterface
             $adapter->createAccount($account);
         }
 
-        // Push web/mail DNS to Synergy when the domain is on Synergy DNS hosting.
+        // Push web/mail DNS to Cloudflare (preferred) or Synergy DNS hosting.
         // Failures are logged and do not roll back a successful panel provision.
-        $this->applySynergyHostingDns($model, $config);
+        $this->applyHostingDns($model, $config);
 
         // Update the service's password to a placeholder value for security reasons
         $model->setPass(self::PASSWORD_PLACEHOLDER);
@@ -1483,11 +1483,11 @@ class Service implements InjectionAwareInterface
 
     /**
      * After OpenPanel/Plesk account create, push A/MX/SPF/DMARC (and optional DKIM)
-     * to Synergy DNS when the Synergy registrar adapter is installed.
+     * to Cloudflare DNS when configured; otherwise Synergy DNS hosting.
      *
      * @param array<string, mixed> $config
      */
-    private function applySynergyHostingDns(ServiceHosting $model, array $config = []): void
+    private function applyHostingDns(ServiceHosting $model, array $config = []): void
     {
         $sld = (string) $model->getSld();
         $tld = (string) $model->getTld();
@@ -1501,13 +1501,81 @@ class Service implements InjectionAwareInterface
             $ipv4 = (string) ($server->getIp() ?: '');
         }
         if ($ipv4 === '' || !filter_var($ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-            $this->di['logger']->warning(sprintf('Skipping Synergy DNS apply for %s: missing IPv4', $domainName));
+            $this->di['logger']->warning(sprintf('Skipping hosting DNS apply for %s: missing IPv4', $domainName));
 
             return;
         }
 
         $ipv6 = $this->resolveServerIpv6($server instanceof ServiceHostingServer ? $server : null);
 
+        $options = [];
+        if ($ipv6 !== null) {
+            $options['ipv6'] = $ipv6;
+        }
+        if (!empty($config['dkim_txt']) && is_string($config['dkim_txt'])) {
+            $options['dkim_txt'] = $config['dkim_txt'];
+        } else {
+            $dkim = $this->fetchOpenPanelDkimTxt($model, $domainName);
+            if ($dkim !== null) {
+                $options['dkim_txt'] = $dkim;
+            }
+        }
+        if (!empty($config['skip_mail'])) {
+            $options['skip_mail'] = true;
+        }
+        if (!empty($config['skip_mx'])) {
+            $options['skip_mx'] = true;
+        }
+
+        $cf = \Dns_Adapter_Cloudflare::fromFossConfig();
+        if ($cf instanceof \Dns_Adapter_Cloudflare && $cf->isEnabled()) {
+            try {
+                $cf->setLog($this->di['logger']);
+                $result = $cf->applyHostingDns($domainName, $ipv4, $options);
+                $this->di['logger']->info(
+                    sprintf(
+                        'Applied Cloudflare hosting DNS for %s → %s%s: %s',
+                        $domainName,
+                        $ipv4,
+                        $ipv6 !== null ? (' / ' . $ipv6) : '',
+                        json_encode($result)
+                    )
+                );
+
+                // Ensure registry NS point at CF when Synergy is the registrar.
+                $this->trySyncSynergyNsToCloudflare($model, $cf);
+
+                // Proxied apex breaks HTTP-01 AutoSSL at origin — use Full (strict) + Origin CA.
+                $this->di['logger']->info(sprintf(
+                    'Skipping OpenPanel AutoSSL trigger for %s (Cloudflare proxy); use Full strict + Origin CA — see cloudflare-dns.md',
+                    $domainName
+                ));
+
+                return;
+            } catch (\Throwable $e) {
+                $this->di['logger']->warning(
+                    sprintf('Cloudflare hosting DNS apply failed for %s: %s', $domainName, $e->getMessage())
+                );
+
+                return;
+            }
+        }
+
+        $this->applySynergyHostingDnsFallback($domainName, $ipv4, $ipv6, $options, $model);
+    }
+
+    /**
+     * Legacy path: write records to Synergy FreeDNS / DNS hosting.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function applySynergyHostingDnsFallback(
+        string $domainName,
+        string $ipv4,
+        ?string $ipv6,
+        array $options,
+        ServiceHosting $model,
+    ): void {
         try {
             /** @var \Box\Mod\Servicedomain\Service $domainService */
             $domainService = $this->di['mod_service']('servicedomain');
@@ -1518,19 +1586,6 @@ class Service implements InjectionAwareInterface
             $adapter = $domainService->registrarGetRegistrarAdapter($registrarModel);
             if (!$adapter instanceof \Registrar_Adapter_Synergy) {
                 return;
-            }
-
-            $options = [];
-            if ($ipv6 !== null) {
-                $options['ipv6'] = $ipv6;
-            }
-            if (!empty($config['dkim_txt']) && is_string($config['dkim_txt'])) {
-                $options['dkim_txt'] = $config['dkim_txt'];
-            } else {
-                $dkim = $this->fetchOpenPanelDkimTxt($model, $domainName);
-                if ($dkim !== null) {
-                    $options['dkim_txt'] = $dkim;
-                }
             }
 
             $result = $adapter->applyHostingDns($domainName, $ipv4, $options);
@@ -1544,15 +1599,63 @@ class Service implements InjectionAwareInterface
                 )
             );
 
-            // After Synergy A/www records exist, ask OpenPanel to obtain AutoSSL
-            // (Caddy on_demand needs an https hit once DNS points at Pluto).
             $this->tryIssueOpenPanelSsl($model, $domainName);
         } catch (\Throwable $e) {
-            // Do not fail activation if DNS provider is unreachable or the domain
-            // is not on Synergy DNS hosting; panel account already exists.
             $this->di['logger']->warning(
                 sprintf('Synergy hosting DNS apply failed for %s: %s', $domainName, $e->getMessage())
             );
+        }
+    }
+
+    /**
+     * Point Synergy registry NS at the Cloudflare-assigned nameservers (dnsConfigType=1).
+     * Uses hosting service SLD/TLD (correct for multi-part TLDs like .com.au).
+     */
+    private function trySyncSynergyNsToCloudflare(ServiceHosting $model, \Dns_Adapter_Cloudflare $cf): void
+    {
+        $sld = (string) $model->getSld();
+        $tld = (string) $model->getTld();
+        $domainName = $sld . $tld;
+        try {
+            /** @var \Box\Mod\Servicedomain\Service $domainService */
+            $domainService = $this->di['mod_service']('servicedomain');
+            $registrarModel = $domainService->registrarFindByAdapter('Synergy');
+            if (!$registrarModel) {
+                return;
+            }
+            $adapter = $domainService->registrarGetRegistrarAdapter($registrarModel);
+            if (!$adapter instanceof \Registrar_Adapter_Synergy) {
+                return;
+            }
+
+            $ns = $cf->getNameservers($domainName);
+            if (count($ns) < 2) {
+                return;
+            }
+
+            $domain = new \Registrar_Domain();
+            $domain->setSld($sld);
+            $domain->setTld($tld);
+            $domain->setNs1($ns[0]);
+            $domain->setNs2($ns[1]);
+            if (isset($ns[2])) {
+                $domain->setNs3($ns[2]);
+            }
+            if (isset($ns[3])) {
+                $domain->setNs4($ns[3]);
+            }
+            $adapter->modifyNs($domain);
+            $this->di['logger']->info(sprintf(
+                'Synergy NS for %s updated to Cloudflare: %s',
+                $domainName,
+                implode(', ', $ns)
+            ));
+        } catch (\Throwable $e) {
+            $this->di['logger']->warning(sprintf(
+                'Synergy→Cloudflare NS sync failed for %s: %s',
+                $domainName,
+                $e->getMessage()
+            ));
         }
     }
 

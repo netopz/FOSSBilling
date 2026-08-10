@@ -466,12 +466,156 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         if (!empty($data['dkim_txt'])) {
             $options['dkim_txt'] = (string) $data['dkim_txt'];
         }
+        if (!empty($data['ipv6'])) {
+            $options['ipv6'] = (string) $data['ipv6'];
+        }
+        if (!empty($data['skip_mx'])) {
+            $options['skip_mx'] = true;
+        }
+        if (!empty($data['skip_mail'])) {
+            $options['skip_mail'] = true;
+        }
 
         return $this->_getSynergyDnsAdapter($data)->applyHostingDns(
             (string) $data['domain'],
             (string) $data['ip'],
             $options,
         );
+    }
+
+    /**
+     * Ensure a Cloudflare zone exists and return assigned nameservers.
+     *
+     * @return array{id: string, name: string, status: string, name_servers: list<string>}
+     */
+    #[RequiredParams(['domain' => 'Domain name is missing'])]
+    public function cloudflare_zone_ensure($data)
+    {
+        $this->checkPermissions('servicedomain', 'manage_domains');
+
+        return $this->_getCloudflareDnsAdapter()->ensureZone((string) $data['domain']);
+    }
+
+    /**
+     * Apply Cloudflare hosting DNS (proxied @/www, grey-cloud mail).
+     *
+     * @optional string $dkim_txt
+     * @optional string $ipv6
+     * @optional bool $skip_mx - leave existing MX (e.g. Google Workspace)
+     * @optional bool $skip_mail - skip all mail/discovery records
+     *
+     * @return array
+     */
+    #[RequiredParams([
+        'domain' => 'Domain name is missing',
+        'ip' => 'Server IPv4 is missing',
+    ])]
+    public function cloudflare_dns_apply_hosting($data)
+    {
+        $this->checkPermissions('servicedomain', 'manage_domains');
+
+        $options = [];
+        if (!empty($data['dkim_txt'])) {
+            $options['dkim_txt'] = (string) $data['dkim_txt'];
+        }
+        if (!empty($data['ipv6'])) {
+            $options['ipv6'] = (string) $data['ipv6'];
+        }
+        if (!empty($data['skip_mx'])) {
+            $options['skip_mx'] = true;
+        }
+        if (!empty($data['skip_mail'])) {
+            $options['skip_mail'] = true;
+        }
+
+        $cf = $this->_getCloudflareDnsAdapter();
+        $result = $cf->applyHostingDns((string) $data['domain'], (string) $data['ip'], $options);
+        try {
+            $cf->setSslMode((string) $data['domain'], 'full');
+        } catch (\Throwable) {
+            // best-effort
+        }
+
+        return $result;
+    }
+
+    /**
+     * One-domain migration helper: CF zone + records, then Synergy NS → Cloudflare.
+     *
+     * @optional string $sld - required with tld when updating Synergy NS (multi-part TLDs)
+     * @optional string $tld - e.g. .com.au
+     * @optional bool $skip_ns - only create zone/records; do not call Synergy modifyNs
+     * @optional bool $skip_mx
+     * @optional bool $skip_mail
+     * @optional string $dkim_txt
+     * @optional string $ipv6
+     *
+     * @return array{zone: array, dns: array, nameservers: list<string>, synergy_ns_updated: bool}
+     */
+    #[RequiredParams([
+        'domain' => 'Domain name is missing',
+        'ip' => 'Server IPv4 is missing',
+    ])]
+    public function cloudflare_migrate_from_synergy($data)
+    {
+        $this->checkPermissions('servicedomain', 'manage_domains');
+
+        $domainName = strtolower(trim((string) $data['domain']));
+        $cf = $this->_getCloudflareDnsAdapter();
+        $options = [];
+        if (!empty($data['dkim_txt'])) {
+            $options['dkim_txt'] = (string) $data['dkim_txt'];
+        }
+        if (!empty($data['ipv6'])) {
+            $options['ipv6'] = (string) $data['ipv6'];
+        }
+        if (!empty($data['skip_mx'])) {
+            $options['skip_mx'] = true;
+        }
+        if (!empty($data['skip_mail'])) {
+            $options['skip_mail'] = true;
+        }
+
+        $dns = $cf->applyHostingDns($domainName, (string) $data['ip'], $options);
+        $zone = $dns['zone'];
+        $ns = $zone['name_servers'];
+        $nsUpdated = false;
+
+        if (empty($data['skip_ns']) && count($ns) >= 2) {
+            $sld = isset($data['sld']) ? (string) $data['sld'] : '';
+            $tld = isset($data['tld']) ? (string) $data['tld'] : '';
+            if ($sld === '' || $tld === '') {
+                throw new \FOSSBilling\Exception(
+                    'sld and tld are required to update Synergy nameservers (e.g. sld=example tld=.com.au)'
+                );
+            }
+            $synergy = $this->_getSynergyDnsAdapter(['registrar' => 'Synergy']);
+            $regDomain = new \Registrar_Domain();
+            $regDomain->setSld($sld);
+            $regDomain->setTld($tld);
+            $regDomain->setNs1($ns[0]);
+            $regDomain->setNs2($ns[1]);
+            if (isset($ns[2])) {
+                $regDomain->setNs3($ns[2]);
+            }
+            if (isset($ns[3])) {
+                $regDomain->setNs4($ns[3]);
+            }
+            $synergy->modifyNs($regDomain);
+            $nsUpdated = true;
+        }
+
+        try {
+            $cf->setSslMode($domainName, 'full');
+        } catch (\Throwable) {
+        }
+
+        return [
+            'zone' => $zone,
+            'dns' => $dns,
+            'nameservers' => $ns,
+            'synergy_ns_updated' => $nsUpdated,
+        ];
     }
 
     /**
@@ -490,6 +634,24 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         }
 
         return $adapter;
+    }
+
+    private function _getCloudflareDnsAdapter(): \Dns_Adapter_Cloudflare
+    {
+        $cf = \Dns_Adapter_Cloudflare::fromFossConfig();
+        if (!$cf instanceof \Dns_Adapter_Cloudflare || !$cf->isEnabled()) {
+            // Allow admin ops when token present even if enabled=false — prefer explicit construct from config.
+            $cfg = \FOSSBilling\Config::getProperty('cloudflare_dns', []);
+            if (!is_array($cfg) || trim((string) ($cfg['api_token'] ?? '')) === '') {
+                throw new \FOSSBilling\Exception(
+                    'Cloudflare DNS is not configured. Set cloudflare_dns.api_token and account_id in config.php'
+                );
+            }
+            $cf = new \Dns_Adapter_Cloudflare(array_merge($cfg, ['enabled' => true]));
+        }
+        $cf->setLog($this->getDi()['logger']);
+
+        return $cf;
     }
 
     #[RequiredParams(['order_id' => 'Order ID is missing'])]

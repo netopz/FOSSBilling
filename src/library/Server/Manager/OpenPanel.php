@@ -402,6 +402,9 @@ public function testConnection(): bool
             }
         }
 
+        // Hostinger-style plan → lean stack / FPM caps (best-effort; never fail order).
+        $this->tryApplyStackProfile($account->getUsername(), (string) $package->getName());
+
         return true;
     }
 
@@ -416,7 +419,7 @@ public function testConnection(): bool
      */
     private function tryPublishDkimZone(string $domain): void
     {
-        $this->runPlutoHelper('vioflare-publish-dkim-zone', $domain, 'DKIM zone publish');
+        $this->runPlutoHelper('vioflare-publish-dkim-zone', [$domain], 'DKIM zone publish');
     }
 
     /**
@@ -425,22 +428,58 @@ public function testConnection(): bool
      */
     public function tryIssueSsl(string $domain): void
     {
-        $this->runPlutoHelper('vioflare-trigger-ssl', $domain, 'AutoSSL trigger');
+        $this->runPlutoHelper('vioflare-trigger-ssl', [$domain], 'AutoSSL trigger');
+    }
+
+    /**
+     * Best-effort: map catalog plan → lean OpenPanel stack / PHP-FPM caps on Pluto.
+     */
+    private function tryApplyStackProfile(string $username, string $planName): void
+    {
+        $this->runPlutoHelper(
+            'vioflare-apply-stack-profile',
+            [$username, $planName],
+            'Stack profile apply'
+        );
     }
 
     /**
      * Run an allow-listed helper on Pluto via the www-data DKIM SSH key /
      * forced-command wrapper.
+     *
+     * @param list<string> $args helper arguments (already validated per helper)
      */
-    private function runPlutoHelper(string $helper, string $domain, string $label): void
+    private function runPlutoHelper(string $helper, array $args, string $label): void
     {
-        $domain = strtolower(trim($domain));
-        if ($domain === '' || !preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/', $domain)) {
+        $allowed = [
+            'vioflare-publish-dkim-zone' => 1,
+            'vioflare-trigger-ssl' => 1,
+            'vioflare-apply-stack-profile' => 2,
+        ];
+        if (!isset($allowed[$helper]) || count($args) !== $allowed[$helper]) {
             return;
         }
-        if (!in_array($helper, ['vioflare-publish-dkim-zone', 'vioflare-trigger-ssl'], true)) {
-            return;
+
+        $validated = [];
+        if ($helper === 'vioflare-apply-stack-profile') {
+            $username = strtolower(trim((string) ($args[0] ?? '')));
+            $planName = trim((string) ($args[1] ?? ''));
+            if ($username === '' || !preg_match('/^[a-z0-9_-]+$/', $username)) {
+                return;
+            }
+            if ($planName === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $planName)) {
+                return;
+            }
+            $validated = [$username, $planName];
+        } else {
+            $domain = strtolower(trim((string) ($args[0] ?? '')));
+            if ($domain === '' || !preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/', $domain)) {
+                return;
+            }
+            $validated = [$domain];
         }
+
+        $subject = implode(' ', $validated);
 
         $ip = trim((string) ($this->_config['ip'] ?? ''));
         if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
@@ -461,20 +500,20 @@ public function testConnection(): bool
             $keyPath = '/var/www/.ssh/id_ed25519_openpanel_dkim';
         }
         if (!is_readable($keyPath)) {
-            $this->getLog()->info($label . ' skipped for ' . $domain . ': SSH key not readable at ' . $keyPath);
+            $this->getLog()->info($label . ' skipped for ' . $subject . ': SSH key not readable at ' . $keyPath);
 
             return;
         }
 
         $knownHosts = dirname($keyPath) . '/known_hosts';
-        // Domain already validated to [a-z0-9.-]; do not quote-wrap (forced-command
-        // wrappers see the literal SSH_ORIGINAL_COMMAND including quotes).
-        $remote = '/usr/local/bin/' . $helper . ' ' . $domain;
+        // Args already validated; do not quote-wrap (forced-command wrappers see
+        // the literal SSH_ORIGINAL_COMMAND including quotes).
+        $remote = '/usr/local/bin/' . $helper . ' ' . implode(' ', $validated);
         $sshOpts = [
             '-i ' . escapeshellarg($keyPath),
             '-o IdentitiesOnly=yes',
             '-o BatchMode=yes',
-            // SSL trigger may wait on DNS + ACME.
+            // SSL trigger / stack profile may wait on compose or DNS + ACME.
             '-o ConnectTimeout=8',
             '-o ServerAliveInterval=15',
             '-o StrictHostKeyChecking=accept-new',
@@ -493,9 +532,9 @@ public function testConnection(): bool
         $code = 0;
         @exec($cmd, $output, $code);
         if ($code !== 0) {
-            $this->getLog()->info($label . ' skipped/failed for ' . $domain . ': ' . implode(' ', $output));
+            $this->getLog()->info($label . ' skipped/failed for ' . $subject . ': ' . implode(' ', $output));
         } else {
-            $this->getLog()->info($label . ' OK for ' . $domain . ': ' . implode(' ', $output));
+            $this->getLog()->info($label . ' OK for ' . $subject . ': ' . implode(' ', $output));
         }
     }
 
@@ -720,17 +759,14 @@ public function testConnection(): bool
         $response = json_decode($response);
 
         if ($response->success) {
-            return true;    
-        
+            $this->tryApplyStackProfile($account->getUsername(), (string) $package->getName());
+
+            return true;
         }
         $client = $account->getClient();
 
 
         throw new Server_Exception('Failed to change package for user ' . $client->getUsername() . ' | Error: ' . $response->error);
-
-       
-
-       
     }
 
     /**

@@ -97,6 +97,7 @@
     },
     "autoload": {
         "psr-0": {
+            "Dns_": "src/library/",
             "Payment_": "src/library/",
             "Registrar_": "src/library/",
             "Server_": "src/library/"

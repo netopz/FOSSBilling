@@ -200,4 +200,16 @@ return [
             // 'client_signup' => ['policy' => 'fixed_window', 'limit' => 5, 'interval' => '1 hour'],
         ],
     ],
+
+    /*
+     * Cloudflare DNS / CDN / WAF (not a registrar — Synergy stays registrar).
+     * When enabled, new Synergy registrations create a CF zone and point NS at Cloudflare;
+     * hosting activate upserts proxied web + grey-cloud mail records.
+     * See fossbilling-docs/cloudflare-dns.md
+     */
+    'cloudflare_dns' => [
+        'enabled' => false,
+        'api_token' => getenv('CLOUDFLARE_API_TOKEN') ?: '',
+        'account_id' => getenv('CLOUDFLARE_ACCOUNT_ID') ?: '',
+    ],
 ];

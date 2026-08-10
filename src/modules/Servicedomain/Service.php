@@ -284,7 +284,75 @@ class Service implements \FOSSBilling\InjectionAwareInterface
             error_log($e->getMessage());
         }
 
+        // Synergy stays registrar; Cloudflare becomes authoritative DNS (best-effort).
+        $this->tryPointDomainAtCloudflare($model, $adapter);
+
         return $model;
+    }
+
+    /**
+     * After Synergy register/transfer: create CF zone and set registry NS to Cloudflare.
+     * Record upserts happen on hosting activate (needs Pluto IPs).
+     */
+    private function tryPointDomainAtCloudflare(ServiceDomain $model, object $adapter): void
+    {
+        $cf = \Dns_Adapter_Cloudflare::fromFossConfig();
+        if (!$cf instanceof \Dns_Adapter_Cloudflare || !$cf->isEnabled()) {
+            return;
+        }
+        if (!$adapter instanceof \Registrar_Adapter_Synergy) {
+            return;
+        }
+
+        $domainName = $model->getSld() . $model->getTld();
+        try {
+            $cf->setLog($this->di['logger']);
+            $zone = $cf->ensureZone($domainName);
+            $ns = $zone['name_servers'];
+            if (count($ns) < 2) {
+                $this->di['logger']->warning(sprintf(
+                    'Cloudflare zone for %s has fewer than 2 nameservers; skipping Synergy NS update',
+                    $domainName
+                ));
+
+                return;
+            }
+
+            $model->setNs1($ns[0]);
+            $model->setNs2($ns[1]);
+            if (isset($ns[2])) {
+                $model->setNs3($ns[2]);
+            }
+            if (isset($ns[3])) {
+                $model->setNs4($ns[3]);
+            }
+            $this->di['em']->flush();
+
+            [$regDomain] = $this->_getD($model);
+            $adapter->modifyNs($regDomain);
+
+            try {
+                $cf->setSslMode($domainName, 'full');
+            } catch (\Throwable $sslErr) {
+                $this->di['logger']->info(sprintf(
+                    'Cloudflare SSL mode set skipped for %s: %s',
+                    $domainName,
+                    $sslErr->getMessage()
+                ));
+            }
+
+            $this->di['logger']->info(sprintf(
+                'Cloudflare zone ready for %s; Synergy NS → %s',
+                $domainName,
+                implode(', ', $ns)
+            ));
+        } catch (\Throwable $e) {
+            $this->di['logger']->warning(sprintf(
+                'Cloudflare DNS provision failed for %s: %s',
+                $domainName,
+                $e->getMessage()
+            ));
+        }
     }
 
     public function action_renew(\Model_ClientOrder $order): bool
