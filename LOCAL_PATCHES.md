@@ -36,6 +36,14 @@ Track divergences from [FOSSBilling/FOSSBilling](https://github.com/FOSSBilling/
 | **Notes** | Keep Vioflare invoice title branding; keep headless SPA helpers (`createInvoicePaymentIntent`, reconcile helpers, `_oneTimeIntentParams`) adapted to Doctrine `Invoice`/`Transaction` |
 | **Files** | `src/library/Payment/Adapter/Stripe.php`, `src/modules/Invoice/Service.php` SPA methods, `src/modules/Invoice/Api/Admin.php` stripe_* endpoints |
 
+### vioflare-email-invoice-branding
+
+| | |
+| --- | --- |
+| **Status** | Active (intentional product fork) |
+| **Notes** | Customer email Twig shells use Vioflare crimson `#d7265c`, `https://vioflare.com/logo.png`, legal footer links; PDF uses `custom-invoice.twig`/`css`; PNG at `public/branding/logo.png`. See `vioflare/fossbilling-docs/EMAIL_BRANDING.md`. After deploy, reset overridden `email_template` rows and set company logo to the PNG. |
+| **Files** | `src/modules/*/templates/email/mod_*.html.twig` (customer-facing), `src/modules/Invoice/templates/pdf/custom-invoice.*`, `src/modules/Invoice/templates/client/mod_invoice_print.html.twig`, `src/public/branding/logo.png` |
+
 ### cloudflare-dns-provider
 
 | | |

@@ -1,0 +1,203 @@
+/**
+ * Vioflare branded invoice PDF CSS (Dompdf / CSS 2.1).
+ * Loaded automatically when custom-invoice.twig is present.
+ */
+
+/* Noto Thai and Lao have no italic faces; use their upright glyphs for emphasized text. */
+
+@font-face {
+    font-family: "Noto Sans Thai";
+    font-style: normal;
+    font-weight: normal;
+    src: url("fonts/NotoSansThai-Regular.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Thai";
+    font-style: italic;
+    font-weight: normal;
+    src: url("fonts/NotoSansThai-Regular.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Thai";
+    font-style: normal;
+    font-weight: bold;
+    src: url("fonts/NotoSansThai-Bold.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Thai";
+    font-style: italic;
+    font-weight: bold;
+    src: url("fonts/NotoSansThai-Bold.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Lao";
+    font-style: normal;
+    font-weight: normal;
+    src: url("fonts/NotoSansLao-Regular.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Lao";
+    font-style: italic;
+    font-weight: normal;
+    src: url("fonts/NotoSansLao-Regular.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Lao";
+    font-style: normal;
+    font-weight: bold;
+    src: url("fonts/NotoSansLao-Bold.ttf") format("truetype");
+}
+
+@font-face {
+    font-family: "Noto Sans Lao";
+    font-style: italic;
+    font-weight: bold;
+    src: url("fonts/NotoSansLao-Bold.ttf") format("truetype");
+}
+
+hr.TopSectionDivider {
+    border: 0;
+    border-top: 4px solid #d7265c;
+    position: relative;
+    top: 45px;
+}
+
+div.InvoiceInfo {
+    position: absolute;
+    right: 30px;
+    top: 0px;
+    line-height: 0.2;
+    color: #15161b;
+}
+
+p.InvoiceInfoTitle {
+    font-size: 22px;
+    font-weight: bold;
+    color: #d7265c;
+    margin-bottom: 12px;
+}
+
+img.CompanyLogo {
+    position: relative;
+    left: 40px;
+    top: 7px;
+}
+
+h3.CompanyInfo {
+    position: absolute;
+    left: 25px;
+    top: 110px;
+    color: #d7265c;
+}
+
+div.CompanyInfo {
+    position: absolute;
+    left: 25px;
+    top: 145px;
+    white-space: normal;
+    line-height: 15px;
+    max-width: 300px;
+    color: #15161b;
+}
+
+h3.ClientInfo {
+    position: absolute;
+    top: 110px;
+    left: 410px;
+    color: #d7265c;
+}
+
+div.ClientInfo {
+    position: absolute;
+    top: 145px;
+    left: 410px;
+    white-space: normal;
+    line-height: 15px;
+    max-width: 45%;
+    color: #15161b;
+}
+
+div.Breakdown {
+    position: absolute;
+    width: 100%;
+    z-index: 9999;
+}
+
+div.InvoiceText {
+    left: 25px;
+    width: 100%;
+    position: absolute;
+    color: #565a66;
+}
+
+table {
+    border-collapse: collapse;
+}
+
+p {
+    font-size: 18px;
+}
+
+tr.BreakdownHeader {
+    background-color: #d7265c;
+    color: #ffffff;
+}
+
+tr.BreakdownHeader th {
+    color: #ffffff;
+    padding: 6px 4px;
+}
+
+tr:nth-of-type(odd) {
+    background-color: #f1f3f6;
+}
+
+tr.TotalRow th {
+    color: #d7265c;
+    padding-top: 6px;
+}
+
+.right {
+    text-align: right;
+}
+
+body {
+    font-family: "DejaVu Sans", "Noto Sans Thai", "Noto Sans Lao";
+    color: #15161b;
+}
+
+html[lang^="th"] body {
+    font-family: "Noto Sans Thai", "DejaVu Sans", "Noto Sans Lao";
+}
+
+html[lang^="lo"] body {
+    font-family: "Noto Sans Lao", "DejaVu Sans", "Noto Sans Thai";
+}
+
+div.InvoiceFooter {
+    z-index: 1;
+    position: absolute;
+    bottom: 0px;
+    width: 100%;
+    text-align: center;
+    font-size: 10px;
+    color: #565a66;
+    border-top: 1px solid #e8eaef;
+    padding-top: 8px;
+}
+
+.muted-text {
+    color: #8a8e99;
+    font-size: 0.75em;
+}
+
+.legal-links {
+    color: #8a8e99;
+    font-size: 0.7em;
+}

@@ -5,44 +5,138 @@
 <html>
 <head>
 	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<style type="text/css">
 		body {
-			font-family: Arial, sans-serif;
+			margin: 0;
+			padding: 0;
+			background-color: #f8f9fb;
+			font-family: Arial, Helvetica, sans-serif;
 			font-size: 14px;
-			color: #333333;
+			line-height: 1.5;
+			color: #15161b;
 		}
-
-		h1 {
-			font-size: 24px;
+		.email-wrapper {
+			width: 100%;
+			background-color: #f8f9fb;
+			padding: 24px 12px;
+		}
+		.email-container {
+			max-width: 600px;
+			margin: 0 auto;
+			background-color: #ffffff;
+			border: 1px solid #e8eaef;
+		}
+		.email-accent {
+			height: 4px;
+			background-color: #d7265c;
+			line-height: 4px;
+			font-size: 0;
+		}
+		.email-header {
+			padding: 24px 28px 16px;
+			border-bottom: 1px solid #e8eaef;
+		}
+		.email-logo {
+			display: block;
+			max-width: 160px;
+			height: auto;
+			border: 0;
+		}
+		.email-body {
+			padding: 28px;
+		}
+		.email-body h1 {
+			font-size: 22px;
 			font-weight: bold;
-			margin: 0 0 20px;
+			color: #15161b;
+			margin: 0 0 16px;
 		}
-
-		p {
-			margin: 0 0 10px;
+		.email-body h2 {
+			font-size: 18px;
+			font-weight: bold;
+			color: #15161b;
+			margin: 20px 0 12px;
 		}
-
-		strong {
+		.email-body p {
+			margin: 0 0 12px;
+			color: #15161b;
+		}
+		.email-body ul {
+			margin: 0 0 16px;
+			padding-left: 20px;
+		}
+		.email-body li {
+			margin: 0 0 6px;
+		}
+		.email-body a {
+			color: #d7265c;
+		}
+		.email-body strong {
 			font-weight: bold;
 		}
-
-		.signature {
+		.email-footer {
+			padding: 20px 28px 24px;
+			background-color: #f8f9fb;
+			border-top: 1px solid #e8eaef;
+			font-size: 12px;
+			color: #565a66;
+			text-align: center;
+		}
+		.email-footer a {
+			color: #565a66;
+			text-decoration: underline;
+		}
+		.email-footer .legal-links {
+			margin: 8px 0 12px;
+		}
+		.email-footer .legal-links a {
+			margin: 0 6px;
+		}
+		.email-signature {
+			margin-top: 8px;
 			font-style: italic;
-			color: #999999;
-			margin-top: 20px;
-			border-top: 1px solid #cccccc;
-			padding-top: 10px;
+			color: #8a8e99;
 		}
 	</style>
 </head>
 <body>
-	<h1>Order Is Now Active</h1>
+	<div class="email-wrapper">
+		<div class="email-container">
+
+		<div class="email-accent">&nbsp;</div>
+		<div class="email-header">
+			<a href="https://vioflare.com" target="_blank">
+				<img class="email-logo" src="https://vioflare.com/logo.png" alt="{{ guest.system_company.name|default('Vioflare') }}" width="160" />
+			</a>
+		</div>
+			<div class="email-body">
+<h1>Order Is Now Active</h1>
 	<p>Hello {{ c.first_name|default('') }} {{ c.last_name|default('') }},</p>
 	<p>Your <strong>{{ order.title|default('') }}</strong> is now activated.</p>
 
     <p>You may <a href="{{ 'login'|url(query: { 'email' : c.email|default('') }, area: 'client') }}" target="_blank">login</a> or <a href="{{ 'client/profile'|url(area: 'client') }}" target="_blank">edit your profile.</a>
+			</div>
 
-	<div class="signature">{{ guest.system_email.signature }}</div>
+		<div class="email-footer">
+			<p style="margin:0 0 4px;"><strong style="color:#15161b;">{{ guest.system_company.name }}</strong></p>
+			{% if guest.system_company.email|default('') %}
+			<p style="margin:0 0 8px;"><a href="mailto:{{ guest.system_company.email }}">{{ guest.system_company.email }}</a></p>
+			{% endif %}
+			<div class="legal-links">
+				<a href="https://vioflare.com/privacy" target="_blank">Privacy</a>
+				<a href="https://vioflare.com/terms" target="_blank">Terms</a>
+				<a href="https://vioflare.com/imprint" target="_blank">Imprint</a>
+				<a href="https://vioflare.com/sitemap" target="_blank">Sitemap</a>
+				<a href="https://status.zahaglobal.co/vioflare" target="_blank">Status</a>
+			</div>
+			<p style="margin:0 0 8px;">&copy; {{ guest.system_company.name }} &middot; <a href="https://vioflare.com" target="_blank">vioflare.com</a></p>
+			{% if guest.system_email.signature|default('') %}
+			<div class="email-signature">{{ guest.system_email.signature }}</div>
+			{% endif %}
+		</div>
+		</div>
+	</div>
 </body>
 </html>
 {% endblock %}

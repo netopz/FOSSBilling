@@ -11,11 +11,24 @@
     <link rel="stylesheet" href="{{ 'build/css/vendor.css' | asset_url }}">
     <link rel="stylesheet" href="{{ 'build/css/huraga.css' | asset_url }}">
     <link rel="shortcut icon" href="{{ guest.system_company.favicon_url }}">
+    <style>
+        :root { --vf-accent: #d7265c; --vf-text: #15161b; --vf-muted: #565a66; --vf-tint: #f8f9fb; }
+        body { color: var(--vf-text); }
+        #invoice-title { color: var(--vf-accent); font-weight: 700; }
+        .vf-accent-bar { height: 4px; background: var(--vf-accent); margin: 0 0 1.5rem; border: 0; }
+        .card { border-color: #e8eaef; }
+        .card h4 { color: var(--vf-accent); }
+        a { color: var(--vf-accent); }
+        .table thead th { background: var(--vf-accent); color: #fff; border-color: var(--vf-accent); }
+        .vf-print-footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e8eaef; text-align: center; font-size: 0.85rem; color: var(--vf-muted); }
+        .vf-print-footer a { color: var(--vf-muted); margin: 0 0.4rem; }
+    </style>
 </head>
 <body>
 <div class="container mt-5">
     <div class="row">
         <div class="col-md-10 offset-md-1">
+            <hr class="vf-accent-bar">
             <div class="text-center">
                 <h2 id="invoice-title">{{ 'Invoice'|trans }} {{ nr }}</h2>
             </div>
@@ -212,6 +225,17 @@
                     </div>
                 </div>
             {% endif %}
+
+            <div class="vf-print-footer">
+                <strong>{{ company.name }}</strong>
+                {% if company.email %}<br><a href="mailto:{{ company.email }}">{{ company.email }}</a>{% endif %}
+                <div class="mt-2">
+                    <a href="https://vioflare.com/privacy" target="_blank" rel="noopener">Privacy</a>
+                    <a href="https://vioflare.com/terms" target="_blank" rel="noopener">Terms</a>
+                    <a href="https://vioflare.com/imprint" target="_blank" rel="noopener">Imprint</a>
+                    <a href="https://vioflare.com/sitemap" target="_blank" rel="noopener">Sitemap</a>
+                </div>
+            </div>
         </div>
     </div>
 </div>

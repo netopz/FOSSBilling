@@ -423,12 +423,14 @@ public function testConnection(): bool
     }
 
     /**
-     * Best-effort: after DNS points at Pluto, hit https://domain to trigger
-     * Caddy AutoSSL (on_demand Let's Encrypt). Safe no-op when SSH/DNS unavailable.
+     * Best-effort: after Synergy DNS points at Pluto, SSH vioflare-trigger-ssl.
+     * That helper HTTPS-probes apex/www/mail/webmail/autoconfig/autodiscover
+     * (Caddy on_demand ACME) and refreshes Dovecot/Postfix SNI for IMAP/SMTP.
+     * Safe no-op when SSH/DNS unavailable. Not used on Cloudflare-proxied path.
      */
     public function tryIssueSsl(string $domain): void
     {
-        $this->runPlutoHelper('vioflare-trigger-ssl', [$domain], 'AutoSSL trigger');
+        $this->runPlutoHelper('vioflare-trigger-ssl', [$domain], 'AutoSSL + mail SNI trigger');
     }
 
     /**
