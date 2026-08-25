@@ -67,7 +67,12 @@ describe('Registrar_Adapter_Synergy', function (): void {
         $client = Mockery::mock(SoapClient::class);
         $client->shouldReceive('__soapCall')
             ->once()
-            ->with('checkDomain', Mockery::type('array'))
+            ->with('checkDomain', Mockery::on(function (array $args): bool {
+                $params = $args[0] ?? [];
+
+                return ($params['command'] ?? null) === 'create'
+                    && isset($params['domainName']);
+            }))
             ->andReturn((object) ['status' => 'AVAILABLE']);
 
         $adapter = buildSynergyAdapter($client);
