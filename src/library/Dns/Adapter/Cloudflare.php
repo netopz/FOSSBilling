@@ -265,6 +265,8 @@ class Dns_Adapter_Cloudflare
         if ($existing !== null) {
             $same = $this->recordEquals($existing, $body, $type);
             if ($same) {
+                $this->dedupeMatchingRecords($zone['id'], $records, $type, $fqdn, $match, (string) $existing['id']);
+
                 return ['action' => 'unchanged', 'id' => (string) $existing['id']];
             }
             $updated = $this->request(
@@ -273,6 +275,7 @@ class Dns_Adapter_Cloudflare
                 $body
             );
             $id = (string) (($updated['result']['id'] ?? $updated['id'] ?? $existing['id']));
+            $this->dedupeMatchingRecords($zone['id'], $records, $type, $fqdn, $match, $id);
 
             return ['action' => 'updated', 'id' => $id];
         }
@@ -329,7 +332,7 @@ class Dns_Adapter_Cloudflare
         $spf = $hasIpv6
             ? sprintf('v=spf1 a mx ip4:%s ip6:%s ~all', $ipv4, $ipv6)
             : sprintf('v=spf1 a mx ip4:%s ~all', $ipv4);
-        $dmarc = $dmarc ?: 'v=DMARC1; p=none; rua=mailto:hostmaster@vioflare.com';
+        $dmarc = $dmarc ?: 'v=DMARC1; p=quarantine; rua=mailto:hostmaster@vioflare.com';
 
         $out = [
             'mail_a' => $this->upsertRecord($domainName, 'A', 'mail', $ipv4, false),
@@ -450,6 +453,47 @@ class Dns_Adapter_Cloudflare
      *
      * @return array<string, mixed>|null
      */
+    /**
+     * @param list<array<string, mixed>> $records
+     * @param array{match_any_of_type?: bool, content_prefix?: string} $match
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function findAllMatchingRecords(array $records, string $type, string $fqdn, array $match): array
+    {
+        $prefix = isset($match['content_prefix']) ? (string) $match['content_prefix'] : null;
+        $anyOfType = !empty($match['match_any_of_type']);
+        $out = [];
+        foreach ($records as $row) {
+            if (strtoupper((string) ($row['type'] ?? '')) !== $type) {
+                continue;
+            }
+            $name = strtolower(rtrim((string) ($row['name'] ?? ''), '.'));
+            if ($name !== strtolower(rtrim($fqdn, '.'))) {
+                continue;
+            }
+            if ($prefix !== null) {
+                $content = trim((string) ($row['content'] ?? ''), '"');
+                if (!str_starts_with($content, $prefix)) {
+                    continue;
+                }
+            }
+            if ($anyOfType || $prefix !== null || true) {
+                $out[] = $row;
+            }
+        }
+
+        return $out;
+    }
+
+    private function deleteDnsRecord(string $zoneId, string $recordId): void
+    {
+        $this->request(
+            'DELETE',
+            '/zones/' . rawurlencode($zoneId) . '/dns_records/' . rawurlencode($recordId),
+        );
+    }
+
     private function findMatchingRecord(array $records, string $type, string $fqdn, array $match): ?array
     {
         $prefix = isset($match['content_prefix']) ? (string) $match['content_prefix'] : null;
@@ -474,6 +518,31 @@ class Dns_Adapter_Cloudflare
         }
 
         return null;
+    }
+
+
+    /**
+     * @param list<array<string, mixed>> $records
+     * @param array{match_any_of_type?: bool, content_prefix?: string} $match
+     */
+    private function dedupeMatchingRecords(
+        string $zoneId,
+        array $records,
+        string $type,
+        string $fqdn,
+        array $match,
+        string $keepId,
+    ): void {
+        if ($type !== 'TXT' && empty($match['match_any_of_type'])) {
+            return;
+        }
+        foreach ($this->findAllMatchingRecords($records, $type, $fqdn, $match) as $row) {
+            $id = (string) ($row['id'] ?? '');
+            if ($id === '' || $id === $keepId) {
+                continue;
+            }
+            $this->deleteDnsRecord($zoneId, $id);
+        }
     }
 
     /**

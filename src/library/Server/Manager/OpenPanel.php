@@ -435,14 +435,30 @@ public function testConnection(): bool
 
     /**
      * Best-effort: map catalog plan → lean OpenPanel stack / PHP-FPM caps on Pluto.
+     * Retries once on failure so new sales are less likely to keep the wrong stack.
      */
     private function tryApplyStackProfile(string $username, string $planName): void
     {
-        $this->runPlutoHelper(
+        $ok = $this->runPlutoHelper(
             'vioflare-apply-stack-profile',
             [$username, $planName],
             'Stack profile apply'
         );
+        if ($ok) {
+            return;
+        }
+        usleep(1_500_000);
+        $retry = $this->runPlutoHelper(
+            'vioflare-apply-stack-profile',
+            [$username, $planName],
+            'Stack profile apply retry'
+        );
+        if (!$retry) {
+            $this->getLog()->err(
+                'Stack profile FAILED for ' . $username . ' plan=' . $planName
+                . ' — account created but lean services may be wrong; re-run vioflare-apply-stack-profile'
+            );
+        }
     }
 
     /**
@@ -450,8 +466,9 @@ public function testConnection(): bool
      * forced-command wrapper.
      *
      * @param list<string> $args helper arguments (already validated per helper)
+     * @return bool true when SSH helper exited 0
      */
-    private function runPlutoHelper(string $helper, array $args, string $label): void
+    private function runPlutoHelper(string $helper, array $args, string $label): bool
     {
         $allowed = [
             'vioflare-publish-dkim-zone' => 1,
@@ -459,7 +476,7 @@ public function testConnection(): bool
             'vioflare-apply-stack-profile' => 2,
         ];
         if (!isset($allowed[$helper]) || count($args) !== $allowed[$helper]) {
-            return;
+            return false;
         }
 
         $validated = [];
@@ -467,16 +484,16 @@ public function testConnection(): bool
             $username = strtolower(trim((string) ($args[0] ?? '')));
             $planName = trim((string) ($args[1] ?? ''));
             if ($username === '' || !preg_match('/^[a-z0-9_-]+$/', $username)) {
-                return;
+                return false;
             }
             if ($planName === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $planName)) {
-                return;
+                return false;
             }
             $validated = [$username, $planName];
         } else {
             $domain = strtolower(trim((string) ($args[0] ?? '')));
             if ($domain === '' || !preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/', $domain)) {
-                return;
+                return false;
             }
             $validated = [$domain];
         }
@@ -494,7 +511,9 @@ public function testConnection(): bool
             }
         }
         if ($ip === '') {
-            return;
+            $this->getLog()->info($label . ' skipped for ' . $subject . ': no Pluto IP');
+
+            return false;
         }
 
         $keyPath = trim((string) ($this->_config['dkim_ssh_key'] ?? ''));
@@ -504,7 +523,7 @@ public function testConnection(): bool
         if (!is_readable($keyPath)) {
             $this->getLog()->info($label . ' skipped for ' . $subject . ': SSH key not readable at ' . $keyPath);
 
-            return;
+            return false;
         }
 
         $knownHosts = dirname($keyPath) . '/known_hosts';
@@ -535,9 +554,12 @@ public function testConnection(): bool
         @exec($cmd, $output, $code);
         if ($code !== 0) {
             $this->getLog()->info($label . ' skipped/failed for ' . $subject . ': ' . implode(' ', $output));
-        } else {
-            $this->getLog()->info($label . ' OK for ' . $subject . ': ' . implode(' ', $output));
+
+            return false;
         }
+        $this->getLog()->info($label . ' OK for ' . $subject . ': ' . implode(' ', $output));
+
+        return true;
     }
 
     /**

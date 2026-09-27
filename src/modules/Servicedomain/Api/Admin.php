@@ -450,6 +450,7 @@ class Admin extends \FOSSBilling\Api\AbstractApi
      * Apply Synergy web + mail DNS for a hosting domain (A/MX/SPF/DMARC, optional DKIM).
      *
      * @optional string $dkim_txt - OpenPanel DKIM public TXT value
+     * @optional string $dmarc - DMARC TXT value (default p=quarantine)
      * @optional string $registrar - adapter code (default Synergy)
      *
      * @return array
@@ -465,6 +466,9 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         $options = [];
         if (!empty($data['dkim_txt'])) {
             $options['dkim_txt'] = (string) $data['dkim_txt'];
+        }
+        if (!empty($data['dmarc'])) {
+            $options['dmarc'] = (string) $data['dmarc'];
         }
         if (!empty($data['ipv6'])) {
             $options['ipv6'] = (string) $data['ipv6'];
@@ -500,6 +504,7 @@ class Admin extends \FOSSBilling\Api\AbstractApi
      * Apply Cloudflare hosting DNS (proxied @/www, grey-cloud mail).
      *
      * @optional string $dkim_txt
+     * @optional string $dmarc - DMARC TXT value (default p=quarantine)
      * @optional string $ipv6
      * @optional bool $skip_mx - leave existing MX (e.g. Google Workspace)
      * @optional bool $skip_mail - skip all mail/discovery records
@@ -517,6 +522,9 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         $options = [];
         if (!empty($data['dkim_txt'])) {
             $options['dkim_txt'] = (string) $data['dkim_txt'];
+        }
+        if (!empty($data['dmarc'])) {
+            $options['dmarc'] = (string) $data['dmarc'];
         }
         if (!empty($data['ipv6'])) {
             $options['ipv6'] = (string) $data['ipv6'];
