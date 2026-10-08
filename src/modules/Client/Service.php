@@ -843,7 +843,7 @@ class Service implements InjectionAwareInterface
             'phone', 'phone_cc', 'gender', 'birthday',
             'company', 'company_vat', 'company_number', 'type',
             'address_1', 'address_2', 'city', 'state', 'postcode', 'country',
-            'lang', 'timezone',
+            'currency', 'lang', 'timezone',
             'custom_1', 'custom_2', 'custom_3', 'custom_4', 'custom_5',
             'custom_6', 'custom_7', 'custom_8', 'custom_9', 'custom_10',
             'custom_11', 'custom_12', 'custom_13', 'custom_14', 'custom_15',
@@ -857,6 +857,20 @@ class Service implements InjectionAwareInterface
         foreach ($allowedFields as $field) {
             if (array_key_exists($field, $data)) {
                 $safeData[$field] = $data[$field];
+            }
+        }
+
+        // Only allow enabled FOSS currencies; reject unknown codes so default applies.
+        if (!empty($safeData['currency'])) {
+            $code = strtoupper(trim((string) $safeData['currency']));
+            $currencyService = $this->di['mod_service']('currency');
+            /** @var \Box\Mod\Currency\Repository\CurrencyRepository $currencyRepository */
+            $currencyRepository = $currencyService->getCurrencyRepository();
+            $currencyModel = $currencyRepository->findOneByCode($code);
+            if ($currencyModel) {
+                $safeData['currency'] = $code;
+            } else {
+                unset($safeData['currency']);
             }
         }
 
