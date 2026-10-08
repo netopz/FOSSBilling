@@ -1067,6 +1067,10 @@ class Service implements InjectionAwareInterface
         $invoice = null;
         $markInvoicePaid = \FOSSBilling\Tools::normalizeBoolean($data['mark_invoice_paid'] ?? false);
 
+        // Persist the Doctrine Order first and commit before any RedBean
+        // (legacy ClientOrder) lookup. Issuing the invoice inside wrapInTransaction
+        // made getLegacyOrder() fail with "Model ClientOrder not found" because
+        // RedBean uses a separate connection and cannot see the uncommitted row.
         $id = $this->di['em']->wrapInTransaction(function () use (
             $client,
             $config,
@@ -1079,8 +1083,7 @@ class Service implements InjectionAwareInterface
             $period,
             $price,
             $product,
-            $quantity,
-            &$invoice
+            $quantity
         ) {
             $order = new Order();
             $order->setClientId($client instanceof ClientEntity ? $client->getId() : (int) $client->id);
@@ -1154,18 +1157,23 @@ class Service implements InjectionAwareInterface
                 $this->di['em']->flush();
             }
 
-            if ($invoiceOption == 'issue-invoice') {
-                $invoiceService = $this->di['mod_service']('invoice');
-
-                try {
-                    $invoice = $invoiceService->generateForOrder($this->getLegacyOrder($order));
-                } catch (InformationException $e) {
-                    $this->di['logger']->warning($e->getMessage());
-                }
-            }
-
             return $orderId;
         });
+
+        $order = $this->getOrderRepository()->find($id);
+        if (!$order instanceof Order) {
+            throw new \FOSSBilling\Exception('Order not found');
+        }
+
+        if ($invoiceOption == 'issue-invoice') {
+            $invoiceService = $this->di['mod_service']('invoice');
+
+            try {
+                $invoice = $invoiceService->generateForOrder($this->getLegacyOrder($order));
+            } catch (InformationException $e) {
+                $this->di['logger']->warning($e->getMessage());
+            }
+        }
 
         if ($invoice instanceof Invoice) {
             $invoiceService = $this->di['mod_service']('invoice');
@@ -1185,11 +1193,6 @@ class Service implements InjectionAwareInterface
                     $this->di['logger']->info($noteException->getMessage());
                 }
             }
-        }
-
-        $order = $this->getOrderRepository()->find($id);
-        if (!$order instanceof Order) {
-            throw new \FOSSBilling\Exception('Order not found');
         }
 
         $this->di['events_manager']->fire(['event' => 'onAfterAdminOrderCreate', 'params' => ['id' => $order->getId()], 'subject' => $this->getProductType($product)]);
