@@ -80,12 +80,12 @@ describe('Registrar_Adapter_Synergy', function (): void {
         expect($adapter->isDomainAvailable(buildSynergyDomain()))->toBeTrue();
     });
 
-    test('registerDomain sends unprefixed contacts with E.164 phone and AU state', function (): void {
+    test('registerDomain uses domainRegisterAU with prefixed contacts for .au', function (): void {
         $captured = null;
         $client = Mockery::mock(SoapClient::class);
         $client->shouldReceive('__soapCall')
             ->once()
-            ->with('domainRegister', Mockery::on(function (array $args) use (&$captured): bool {
+            ->with('domainRegisterAU', Mockery::on(function (array $args) use (&$captured): bool {
                 $captured = $args[0] ?? null;
 
                 return is_array($captured);
@@ -93,18 +93,28 @@ describe('Registrar_Adapter_Synergy', function (): void {
             ->andReturn((object) ['status' => 'OK']);
 
         $adapter = buildSynergyAdapter($client);
+        $adapter->setOrderConfig([
+            'Eligibility Type' => 'Company',
+            'Eligibility Name' => 'Example Pty Ltd',
+            'Eligibility ID' => '123456789',
+            'Eligibility ID Type' => 'ACN',
+        ]);
         $result = $adapter->registerDomain(buildSynergyDomain());
 
         expect($result)->toBeTrue()
             ->and($captured['resellerID'])->toBe('12345')
             ->and($captured['apiKey'])->toBe('test-key')
             ->and($captured['domainName'])->toBe('example-test.com.au')
-            ->and($captured['firstname'])->toBe('Jane')
-            ->and($captured['suburb'])->toBe('Sydney')
-            ->and($captured['state'])->toBe('NSW')
-            ->and($captured['phone'])->toBe('+61412345678')
-            ->and($captured['address'])->toBe(['1 Example St'])
-            ->and($captured)->not->toHaveKey('registrant_firstname');
+            ->and($captured['registrant_firstname'])->toBe('Jane')
+            ->and($captured['registrant_suburb'])->toBe('Sydney')
+            ->and($captured['registrant_state'])->toBe('NSW')
+            ->and($captured['registrant_phone'])->toBe('+61412345678')
+            ->and($captured['registrant_fax'])->toBe('')
+            ->and($captured['registrant_address'])->toBe(['1 Example St', ''])
+            ->and($captured['eligibilityType'])->toBe('Company')
+            ->and($captured['eligibilityID'])->toBe('123456789')
+            ->and($captured['eligibilityIDType'])->toBe('ACN')
+            ->and($captured)->not->toHaveKey('firstname');
     });
 
     test('modifyContact prefixes contact roles', function (): void {
@@ -255,11 +265,11 @@ describe('Registrar_Adapter_Synergy', function (): void {
             'status' => 'OK',
             'records' => [],
         ]);
-        // adds for apex A, www A, mail A, MX, SPF, DMARC, autoconfig A, autodiscover A, 4x SRV, DKIM
+        // adds for apex A, www A, mail A, MX, SPF, DMARC, autoconfig A, autodiscover A, 4x SRV, DKIM (+ extras)
         // (without ipv6 — baseline hosting apply)
         $client->shouldReceive('__soapCall')
             ->with('addDNSRecord', Mockery::type('array'))
-            ->times(12)
+            ->times(14)
             ->andReturn((object) ['status' => 'OK', 'id' => 'new']);
 
         $adapter = buildSynergyAdapter($client);
@@ -278,10 +288,10 @@ describe('Registrar_Adapter_Synergy', function (): void {
             'status' => 'OK',
             'records' => [],
         ]);
-        // baseline 12 + apex/www/mail/autoconfig/autodiscover AAAA = 17
+        // baseline 14 + apex/www/mail/autoconfig/autodiscover AAAA = 19–20 depending on mail extras
         $client->shouldReceive('__soapCall')
             ->with('addDNSRecord', Mockery::type('array'))
-            ->times(17)
+            ->times(20)
             ->andReturn((object) ['status' => 'OK', 'id' => 'new']);
 
         $adapter = buildSynergyAdapter($client);

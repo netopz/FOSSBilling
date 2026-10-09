@@ -1705,7 +1705,7 @@ class Service implements InjectionAwareInterface
             return;
         }
         $domainName = $sld . $tld;
-        $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
+        $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServer()?->getId());
         $ipv4 = (string) ($model->getIp() ?: '');
         if ($ipv4 === '' && $server instanceof ServiceHostingServer) {
             $ipv4 = (string) ($server->getIp() ?: '');
@@ -1901,7 +1901,7 @@ class Service implements InjectionAwareInterface
     private function tryIssueOpenPanelSsl(ServiceHosting $model, string $domainName): void
     {
         try {
-            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
+            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServer()?->getId());
             if (!$server instanceof ServiceHostingServer) {
                 return;
             }
@@ -1930,7 +1930,7 @@ class Service implements InjectionAwareInterface
     private function fetchOpenPanelDkimTxt(ServiceHosting $model, string $domainName): ?string
     {
         try {
-            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServerId());
+            $server = $this->getServiceHostingServerRepository()->find((int) $model->getServiceHostingServer()?->getId());
             if (!$server instanceof ServiceHostingServer) {
                 return null;
             }

@@ -45,6 +45,14 @@ function orderServiceCreateInvoiceModel(int $id): Invoice
     return $invoice;
 }
 
+function orderServiceCreateLegacyOrderModel(int $id): Model_ClientOrder
+{
+    $order = new Model_ClientOrder();
+    $order->id = $id;
+
+    return $order;
+}
+
 final class OrderServiceTestEventRecorder
 {
     /** @var list<FOSSBilling\Events\Event> */
@@ -2482,8 +2490,9 @@ test('createFromOrder syncs RedBean ClientOrder service_id before activate', fun
     $periodMock = Mockery::mock(Box_Period::class);
     $periodMock->shouldReceive('getExpirationTime')->once()->andReturn(strtotime('+1 month'));
 
+    // Stock is reserved at createOrder time now; activate must not reduce again.
     $productServiceMock = Mockery::mock();
-    $productServiceMock->shouldReceive('reduceStock')->once()->with(7, 1);
+    $productServiceMock->shouldReceive('reduceStock')->never();
 
     $serviceMock = Mockery::mock(Service::class)->makePartial();
     $serviceMock->shouldAllowMockingProtectedMethods();

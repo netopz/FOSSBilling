@@ -2282,14 +2282,12 @@ describe('Stripe webhook gateway ownership', function (): void {
         $invoice->nr = 15;
         $invoice->serie = 'INV';
 
-        $connection = Mockery::mock(Doctrine\DBAL\Connection::class);
-        $connection->shouldReceive('fetchAllAssociative')->once()->andReturn([['title' => 'Hosting']]);
-
+        // Vioflare getInvoiceTitle() brands from serie/nr and does not query
+        // invoice_item titles, so no Connection fetch is required here.
         $invoiceService = Mockery::mock();
         $invoiceService->shouldReceive('getTotalWithTax')->once()->andReturn(15.00);
 
         $di = container();
-        $di['em']->shouldReceive('getConnection')->andReturn($connection);
         $di['mod_service'] = $di->protect(fn () => $invoiceService);
         $adapter->setDi($di);
 

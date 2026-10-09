@@ -574,17 +574,28 @@ test('activates action', function (string $action, string $registerDomainCalled,
     $domainModel = new ServiceDomain();
     $domainModel->setRegistrar(new TldRegistrar());
     $domainModel->setAction($action);
+    $domainModel->setNs1('ns1.example.com');
+    $domainModel->setNs2('ns2.example.com');
 
     $orderServiceMock = Mockery::mock(OrderService::class);
     $orderServiceMock->shouldReceive('getOrderService')
         ->atLeast()->once()
         ->andReturn($domainModel);
+    $orderServiceMock->shouldReceive('getConfig')
+        ->atLeast()->once()
+        ->andReturn(['action' => $action]);
+
+    $systemServiceMock = Mockery::mock(SystemService::class);
+    $systemServiceMock->shouldReceive('getNameservers')
+        ->atLeast()->once()
+        ->andReturn([]);
 
     $registrarAdapterMock = Mockery::mock('Registrar_Adapter_Custom');
     $registrarAdapterMock->shouldReceive('registerDomain')
         ->{$registerDomainCalled}();
     $registrarAdapterMock->shouldReceive('transferDomain')
         ->{$transferDomainCalled}();
+    $registrarAdapterMock->shouldReceive('setOrderConfig')->byDefault();
 
     $serviceMock = Mockery::mock(Service::class)->makePartial()->shouldAllowMockingProtectedMethods();
     $serviceMock->shouldReceive('_getD')
@@ -595,7 +606,13 @@ test('activates action', function (string $action, string $registerDomainCalled,
         ->andReturn(null);
 
     $di = container();
-    $di['mod_service'] = $di->protect(fn ($name) => $orderServiceMock);
+    $di['mod_service'] = $di->protect(function ($name) use ($orderServiceMock, $systemServiceMock) {
+        if ($name === 'order') {
+            return $orderServiceMock;
+        }
+
+        return $systemServiceMock;
+    });
     $serviceMock->setDi($di);
 
     $order = createEntity(Order::class, ['client_id' => 1]);

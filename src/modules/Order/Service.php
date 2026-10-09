@@ -1215,6 +1215,44 @@ class Service implements InjectionAwareInterface
             // by a caller passing their own "stock_reserved_qty" meta entry.
             $this->di['mod_service']('Product')->reserveStockForOrder($order);
 
+            if ($invoiceOption == 'issue-invoice') {
+                $invoiceService = $this->di['mod_service']('invoice');
+
+                try {
+                    // Promo lines are added explicitly below so the first
+                    // invoice records a checkout redemption, not a renewal one.
+                    // Invoice::generateForOrder expects the Doctrine Order entity.
+                    $invoice = $invoiceService->generateForOrder($order, null, false);
+                } catch (InformationException $e) {
+                    $this->di['logger']->warning($e->getMessage());
+                }
+
+                if ($promo instanceof \Box\Mod\Product\Entity\Promo && $promoDiscount > 0 && $invoice instanceof Invoice) {
+                    $clientService = $this->di['mod_service']('client');
+                    $invoiceItemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
+                    $invoiceItemService->addNew($invoice, [
+                        'title' => __trans('Discount: :product', [':product' => $order->getTitle()]),
+                        'price' => $promoDiscount * -1,
+                        'quantity' => 1,
+                        'unit' => 'discount',
+                        'rel_id' => (string) $order->getId(),
+                        'taxed' => $clientService->isClientTaxable($client),
+                    ]);
+
+                    $productService = $this->di['mod_service']('Product');
+                    $productService->createPromoRedemption(
+                        $promo,
+                        $client,
+                        $order,
+                        $invoice,
+                        \Box\Mod\Product\Entity\PromoRedemption::PHASE_CHECKOUT,
+                        $promoDiscount,
+                        $currency->getCode(),
+                        $order->getCreatedAt()?->format('Y-m-d H:i:s'),
+                        \Box\Mod\Product\Entity\PromoRedemption::STATUS_RESERVED,
+                    );
+                }
+            }
 
             if ($promo instanceof \Box\Mod\Product\Entity\Promo && $promoDiscount > 0 && !$invoice instanceof Invoice) {
                 $this->di['mod_service']('Product')->createPromoRedemption(
@@ -1232,21 +1270,6 @@ class Service implements InjectionAwareInterface
 
             return $orderId;
         });
-
-        $order = $this->getOrderRepository()->find($id);
-        if (!$order instanceof Order) {
-            throw new \FOSSBilling\Exception('Order not found');
-        }
-
-        if ($invoiceOption == 'issue-invoice') {
-            $invoiceService = $this->di['mod_service']('invoice');
-
-            try {
-                $invoice = $invoiceService->generateForOrder($this->getLegacyOrder($order));
-            } catch (InformationException $e) {
-                $this->di['logger']->warning($e->getMessage());
-            }
-        }
 
         if ($invoice instanceof Invoice) {
             $invoiceService = $this->di['mod_service']('invoice');

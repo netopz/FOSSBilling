@@ -98,6 +98,7 @@ class SentryHelper
         'Resellbiz',
         'Resellerclub',
         'Resellerid',
+        'Synergy',
     ];
 
     // Same as above, for the server managers we ship.
@@ -106,6 +107,7 @@ class SentryHelper
         'CWP',
         'Directadmin',
         'Hestia',
+        'OpenPanel',
         'Plesk',
         'Whm',
     ];
