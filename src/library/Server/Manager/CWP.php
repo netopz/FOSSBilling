@@ -134,14 +134,21 @@ class Server_Manager_CWP extends Server_Manager
         $new = clone $account;
         $acc = $this->request('accountdetail', $data);
 
-        if ($acc['account_info']['state'] == 'suspended') {
+        $info = $acc['account_info'] ?? null;
+        if (!is_array($info) || !is_string($info['state'] ?? null) || !is_string($info['package_name'] ?? null)) {
+            throw new Server_Exception('CWP did not return valid account details. Check that the account exists and the API key has permission to view it.');
+        }
+
+        if ($info['state'] == 'suspended') {
             $new->setSuspended(true);
         } else {
             $new->setSuspended(false);
         }
 
-        $new->setPackage($acc['account_info']['package_name']);
-        $new->setReseller(FOSSBilling\Tools::normalizeBoolean($acc['account_info']['reseller'] ?? false));
+        $package = new Server_Package();
+        $package->setName($info['package_name']);
+        $new->setPackage($package);
+        $new->setReseller(FOSSBilling\Tools::normalizeBoolean($info['reseller'] ?? false));
 
         return $new;
     }
@@ -207,7 +214,7 @@ class Server_Manager_CWP extends Server_Manager
         ];
 
         if (!$this->request('account', $data)) {
-            $placeholders = ['action' => __trans('suspend account'), 'type' => 'CWP'];
+            $placeholders = [':action:' => __trans('suspend account'), ':type:' => 'CWP'];
 
             throw new Server_Exception('Failed to :action: on the :type: server, check the error logs for further details', $placeholders);
         }
@@ -401,7 +408,14 @@ class Server_Manager_CWP extends Server_Manager
         $request = $client->request('POST', $url, [
             'body' => $data,
         ]);
-        $response = $request->toArray();
+
+        try {
+            $response = $request->toArray();
+        } catch (Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface $e) {
+            throw new Server_Exception('The CWP server returned HTTP status :status. Check server availability and API configuration.', [':status' => $e->getResponse()->getStatusCode()]);
+        } catch (Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface) {
+            throw new Server_Exception('The CWP server returned an invalid JSON response. Check the server address, port and API configuration.');
+        }
 
         // Get the status, result, and message from the response, with default values if they are not set
         $status = $response['status'] ?? 'Error';
@@ -410,7 +424,7 @@ class Server_Manager_CWP extends Server_Manager
 
         // If the status is not 'OK', log an error message and return false
         if ($status !== 'OK') {
-            error_log('CWP Server manager error. Status: ' . $status . '. Message: ' . $msg);
+            $this->getLog()->error('CWP Server manager error. Status: ' . $status . '. Message: ' . $msg);
 
             return false;
         }

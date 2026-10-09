@@ -13,9 +13,10 @@ namespace Box\Mod\Invoice;
 
 use Box\Mod\Invoice\Entity\Invoice;
 use Box\Mod\Invoice\Entity\PayGateway;
+use Box\Mod\Invoice\Entity\Subscription;
+use Box\Mod\Invoice\Entity\Transaction;
 use Box\Mod\Invoice\Repository\PayGatewayRepository;
 use FOSSBilling\InjectionAwareInterface;
-use FOSSBilling\Tools;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Filesystem\Path;
 use Symfony\Component\Finder\Exception\DirectoryNotFoundException;
@@ -23,6 +24,13 @@ use Symfony\Component\Finder\Finder;
 
 class ServicePayGateway implements InjectionAwareInterface
 {
+    /**
+     * Sent by the admin UI in place of a secret config field's value to mean
+     * "keep the currently stored value". Blank input means the same thing;
+     * this sentinel exists only for clients that can't send an empty string.
+     */
+    public const string CREDENTIAL_KEEP_SENTINEL = '__KEEP__';
+
     protected ?\Pimple\Container $di = null;
 
     protected PayGatewayRepository $payGatewayRepository;
@@ -58,7 +66,7 @@ class ServicePayGateway implements InjectionAwareInterface
         $sql = 'SELECT id, gateway, name
             FROM pay_gateway';
 
-        $rows = $this->di['db']->getAll($sql);
+        $rows = $this->di['em']->getConnection()->fetchAllAssociative($sql);
         $result = [];
         foreach ($rows as $row) {
             $result[$row['id']] = $row['name'];
@@ -75,7 +83,7 @@ class ServicePayGateway implements InjectionAwareInterface
         $sql = 'SELECT id, gateway, name
             FROM pay_gateway';
 
-        $rows = $this->di['db']->getAll($sql);
+        $rows = $this->di['em']->getConnection()->fetchAllAssociative($sql);
         $exists = [];
         foreach ($rows as $row) {
             $exists[$row['gateway']] = $row['name'];
@@ -131,7 +139,7 @@ class ServicePayGateway implements InjectionAwareInterface
         $this->di['em']->persist($new);
         $this->di['em']->flush();
 
-        $this->di['logger']->info('Installed new payment gateway %s', $code);
+        $this->di['logger']->info('Installed new payment gateway {code}', ['code' => $code]);
 
         return true;
     }
@@ -149,10 +157,19 @@ class ServicePayGateway implements InjectionAwareInterface
             'accepted_currencies' => $this->getAcceptedCurrencies($model),
         ];
 
-        if ($identity instanceof \Model_Admin) {
+        if ($identity instanceof \Box\Mod\Staff\Entity\Admin) {
+            $config = json_decode($model->getConfig() ?? '', true) ?? [];
+            $secretFields = $this->getSecretFields($model);
+            foreach ($secretFields as $field) {
+                $value = $config[$field] ?? null;
+                $config[$field] = null;
+                $config[$field . '_set'] = $value !== null && $value !== '';
+            }
+
             $result['supports_one_time_payments'] = $single;
             $result['supports_subscriptions'] = $recurrent;
-            $result['config'] = json_decode($model->getConfig() ?? '', true) ?? [];
+            $result['config'] = $config;
+            $result['secret_fields'] = $secretFields;
             $result['form'] = $this->getFormElements($model);
             $result['description'] = $this->getDescription($model);
             $result['enabled'] = $model->isEnabled();
@@ -161,6 +178,40 @@ class ServicePayGateway implements InjectionAwareInterface
         }
 
         return $result;
+    }
+
+    /**
+     * Config field names for this gateway's adapter whose stored values must
+     * be hidden in the API and admin UI: the adapter's own declared secrets
+     * plus any form field marked `'secret' => true`.
+     *
+     * @return string[]
+     */
+    public function getSecretFields(PayGateway $model): array
+    {
+        $secrets = [];
+
+        try {
+            $class = $this->getAdapterClassName($model);
+            if (is_callable($class . '::getSecretFields')) {
+                $declared = $class::getSecretFields();
+                $secrets = array_merge($secrets, $declared);
+            }
+        } catch (\Throwable) {
+            // Gateway adapter could not be resolved; fall back to the form's own 'secret' flags below.
+        }
+
+        $form = $this->getAdapterConfig($model)['form'] ?? [];
+        if (is_array($form)) {
+            foreach ($form as $name => $element) {
+                $options = $element[1] ?? [];
+                if (!empty($options['secret'])) {
+                    $secrets[] = (string) $name;
+                }
+            }
+        }
+
+        return array_values(array_unique($secrets));
     }
 
     public function copy(PayGateway $model): int
@@ -175,7 +226,7 @@ class ServicePayGateway implements InjectionAwareInterface
         $this->di['em']->persist($new);
         $this->di['em']->flush();
         $newId = (int) $new->getId();
-        $this->di['logger']->info('Copied payment gateway #%s - %s', $newId, $model->getGateway());
+        $this->di['logger']->info('Copied payment gateway #{gateway_id} - {gateway}', ['gateway_id' => $newId, 'gateway' => $model->getGateway()]);
 
         return $newId;
     }
@@ -186,9 +237,15 @@ class ServicePayGateway implements InjectionAwareInterface
 
         $newEnabled = isset($data['enabled']) ? (bool) $data['enabled'] : $model->isEnabled();
         $newTestMode = isset($data['test_mode']) ? (bool) $data['test_mode'] : $model->isTestMode();
-        $mergedConfig = json_decode($model->getConfig() ?? '', true) ?? [];
+        $existingConfig = json_decode($model->getConfig() ?? '', true) ?? [];
+        $mergedConfig = $existingConfig;
         if (isset($data['config']) && is_array($data['config'])) {
-            $mergedConfig = array_merge($mergedConfig, $data['config']);
+            $secretFields = $this->getSecretFields($model);
+            foreach ($data['config'] as $key => $value) {
+                $mergedConfig[$key] = in_array($key, $secretFields, true)
+                    ? $this->normalizeSecretValue($key, $value, $existingConfig[$key] ?? null, $model)
+                    : $value;
+            }
         }
 
         if ($newEnabled) {
@@ -208,7 +265,7 @@ class ServicePayGateway implements InjectionAwareInterface
         $model->setAllowRecurrent((bool) ($data['allow_recurrent'] ?? $model->isAllowRecurrent()));
         $model->setTestMode($newTestMode);
         $this->di['em']->flush();
-        $this->di['logger']->info('Updated payment gateway %s', $model->getGateway());
+        $this->di['logger']->info('Updated payment gateway {model_gateway}', ['model_gateway' => $model->getGateway()]);
 
         return true;
     }
@@ -237,12 +294,51 @@ class ServicePayGateway implements InjectionAwareInterface
         }
     }
 
+    /**
+     * Returns the value to store for a secret config field. Blank, whitespace-only
+     * or {@see CREDENTIAL_KEEP_SENTINEL} inputs preserve the existing value;
+     * everything else replaces it. A successful rotation is logged (the value
+     * itself is never logged).
+     */
+    private function normalizeSecretValue(string $field, mixed $incoming, mixed $existing, PayGateway $model): mixed
+    {
+        if ($incoming === null || !is_scalar($incoming)) {
+            return $existing;
+        }
+
+        $incoming = (string) $incoming;
+
+        if (trim($incoming) === '' || $incoming === self::CREDENTIAL_KEEP_SENTINEL) {
+            return $existing;
+        }
+
+        if ($incoming !== $existing) {
+            $adminId = $this->di['loggedin_admin']->getId() ?? 'unknown';
+            $this->di['logger']->info('Rotated {field} for payment gateway {gateway_id} by admin {admin_id}', ['field' => $field, 'gateway_id' => (string) $model->getId(), 'admin_id' => (string) $adminId]);
+        }
+
+        return $incoming;
+    }
+
     public function delete(PayGateway $model): bool
     {
-        $id = $model->getId();
+        $id = (int) $model->getId();
+
+        if ($this->di['em']->getRepository(Invoice::class)->existsByGatewayId($id)) {
+            throw new \FOSSBilling\InformationException('Cannot remove payment gateway with existing invoices');
+        }
+
+        if ($this->di['em']->getRepository(Subscription::class)->existsByGatewayId($id)) {
+            throw new \FOSSBilling\InformationException('Cannot remove payment gateway with existing subscriptions');
+        }
+
+        if ($this->di['em']->getRepository(Transaction::class)->existsByGatewayId($id)) {
+            throw new \FOSSBilling\InformationException('Cannot remove payment gateway with existing transactions');
+        }
+
         $this->di['em']->remove($model);
         $this->di['em']->flush();
-        $this->di['logger']->info('Removed payment gateway %s', $id);
+        $this->di['logger']->info('Removed payment gateway {id}', ['id' => $id]);
 
         return true;
     }
@@ -267,6 +363,14 @@ class ServicePayGateway implements InjectionAwareInterface
                 if (!empty($config['logo'])) {
                     $gateway['logo'] = $config['logo'];
                     $gateway['logo']['logo'] = $this->resolveGatewayLogo($config['logo']);
+                } else {
+                    // Templates read gtw.logo.logo/height/width unconditionally,
+                    // so always provide the key even when the adapter ships no logo.
+                    $gateway['logo'] = [
+                        'logo' => $this->resolveGatewayLogo([]),
+                        'height' => '50px',
+                        'width' => '50px',
+                    ];
                 }
 
                 $result[] = $gateway;
@@ -304,6 +408,27 @@ class ServicePayGateway implements InjectionAwareInterface
         return $model->isAllowSingle();
     }
 
+    /**
+     * Whether the gateway settles payments through explicit admin approval
+     * instead of a verifiable gateway callback.
+     *
+     * Resolved from the adapter class without instantiating it, so a
+     * misconfigured automated gateway (missing API keys) still reports its
+     * capability. Unknown or legacy adapters default to automated handling.
+     */
+    public static function isManualApprovalGateway(?string $code): bool
+    {
+        if ($code === null || $code === '') {
+            return false;
+        }
+        $class = "Payment_Adapter_{$code}";
+        if (!class_exists($class) || !is_callable([$class, 'requiresManualApproval'])) {
+            return false;
+        }
+
+        return (bool) $class::requiresManualApproval();
+    }
+
     public function getPaymentAdapter(PayGateway $pg, ?Invoice $model = null, $optional = []): object
     {
         $config = json_decode($pg->getConfig() ?? '', true) ?? [];
@@ -318,7 +443,7 @@ class ServicePayGateway implements InjectionAwareInterface
         $defaults['continue_shopping_url'] = $this->di['tools']->url('/order');
         $defaults['single_page'] = true;
         if ($model instanceof Invoice) {
-            $defaults['thankyou_url'] = $this->di['url']->link("/invoice/thank-you/{$model->getHash()}", ['restore_token' => Tools::createSessionRestoreToken(session_id())]);
+            $defaults['thankyou_url'] = $this->getPaymentReturnUrl($model, 'thankyou');
             $defaults['invoice_url'] = $this->di['tools']->url("/invoice/{$model->getHash()}");
         }
 
@@ -365,7 +490,7 @@ class ServicePayGateway implements InjectionAwareInterface
         }
 
         if (!method_exists($class, 'getConfig')) {
-            error_log("Payment $class gateway does not have getConfig method");
+            $this->di['logger']->error("Payment $class gateway does not have getConfig method");
 
             return [];
         }
@@ -443,20 +568,22 @@ class ServicePayGateway implements InjectionAwareInterface
 
     private function getReturnUrl(PayGateway $pg, ?Invoice $model = null): string
     {
-        if ($model instanceof Invoice) {
-            return $this->di['url']->link("/invoice/{$model->getHash()}", ['status' => 'ok', 'restore_token' => Tools::createSessionRestoreToken(session_id())]);
-        }
-
-        return $this->di['url']->link('/invoice', ['status' => 'ok', 'restore_token' => Tools::createSessionRestoreToken(session_id())]);
+        return $this->getPaymentReturnUrl($model, 'ok');
     }
 
     private function getCancelUrl(PayGateway $pg, ?Invoice $model = null): string
     {
+        return $this->getPaymentReturnUrl($model, 'cancel');
+    }
+
+    private function getPaymentReturnUrl(?Invoice $model, string $status): string
+    {
+        $params = ['status' => $status];
         if ($model instanceof Invoice) {
-            return $this->di['url']->link("/invoice/{$model->getHash()}", ['status' => 'cancel', 'restore_token' => Tools::createSessionRestoreToken(session_id())]);
+            $params['hash'] = $model->getHash();
         }
 
-        return $this->di['url']->link('/invoice', ['status' => 'cancel', 'restore_token' => Tools::createSessionRestoreToken(session_id())]);
+        return $this->di['url']->link('/invoice/payment-return', $params);
     }
 
     private function getCallbackRedirect(PayGateway $pg, ?Invoice $model = null): string

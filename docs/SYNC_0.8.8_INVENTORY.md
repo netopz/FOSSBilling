@@ -43,3 +43,12 @@
 - `893db12ea` CF adapter
 - Synergy DNS / OpenPanel AutoSSL / DKIM commits
 - Deploy autoload fixes
+
+## Sync target adjustment
+
+`tags/0.8.8` Stripe adapter still uses RedBean `Model_Invoice`. Vioflare production
+already uses Doctrine `Entity\Invoice` + SPA authorize APIs. Merging 0.8.8 would
+regress payments.
+
+**Actual merge:** `upstream/main` (includes 0.8.8 security lineage + Entity Stripe).
+Branch name `sync/upstream-0.8.8` retained; tip is upstream/main + Vioflare preserve.

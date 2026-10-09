@@ -22,6 +22,7 @@ use Doctrine\ORM\EntityManagerInterface;
 
 use function Tests\Helpers\container;
 use function Tests\Helpers\createEntity;
+use function Tests\Helpers\setEntityId;
 
 function taxService(TaxRepository $taxRepository, ?EntityManagerInterface $em = null): ServiceTax
 {
@@ -52,8 +53,7 @@ test('gets tax rate for client by country and state', function (): void {
     $clientServiceMock = Mockery::mock(ClientService::class);
     $clientServiceMock->shouldReceive('isClientTaxable')->andReturn(true);
 
-    $clientModel = new Model_Client();
-    $clientModel->loadBean(new Tests\Helpers\DummyBean());
+    $clientModel = createEntity(Box\Mod\Client\Entity\Client::class);
 
     $service = taxService($taxRepo);
     $service->getDi()['mod_service'] = $service->getDi()->protect(fn (): Mockery\MockInterface => $clientServiceMock);
@@ -75,8 +75,7 @@ test('gets tax rate for client by country', function (): void {
     $clientServiceMock = Mockery::mock(ClientService::class);
     $clientServiceMock->shouldReceive('isClientTaxable')->andReturn(true);
 
-    $clientModel = new Model_Client();
-    $clientModel->loadBean(new Tests\Helpers\DummyBean());
+    $clientModel = createEntity(Box\Mod\Client\Entity\Client::class);
 
     $service = taxService($taxRepo);
     $service->getDi()['mod_service'] = $service->getDi()->protect(fn (): Mockery\MockInterface => $clientServiceMock);
@@ -97,8 +96,7 @@ test('gets tax rate for client from global rule', function (): void {
     $clientServiceMock = Mockery::mock(ClientService::class);
     $clientServiceMock->shouldReceive('isClientTaxable')->andReturn(true);
 
-    $clientModel = new Model_Client();
-    $clientModel->loadBean(new Tests\Helpers\DummyBean());
+    $clientModel = createEntity(Box\Mod\Client\Entity\Client::class);
 
     $service = taxService($taxRepo);
     $service->getDi()['mod_service'] = $service->getDi()->protect(fn (): Mockery\MockInterface => $clientServiceMock);
@@ -117,8 +115,7 @@ test('returns zero tax rate when tax not found', function (): void {
     $clientServiceMock = Mockery::mock(ClientService::class);
     $clientServiceMock->shouldReceive('isClientTaxable')->andReturn(true);
 
-    $clientModel = new Model_Client();
-    $clientModel->loadBean(new Tests\Helpers\DummyBean());
+    $clientModel = createEntity(Box\Mod\Client\Entity\Client::class);
 
     $service = taxService($taxRepo);
     $service->getDi()['mod_service'] = $service->getDi()->protect(fn (): Mockery\MockInterface => $clientServiceMock);
@@ -133,8 +130,7 @@ test('returns zero tax rate when client is not taxable', function (): void {
     $clientServiceMock = Mockery::mock(ClientService::class);
     $clientServiceMock->shouldReceive('isClientTaxable')->andReturn(false);
 
-    $clientModel = new Model_Client();
-    $clientModel->loadBean(new Tests\Helpers\DummyBean());
+    $clientModel = createEntity(Box\Mod\Client\Entity\Client::class);
 
     $service = taxService($taxRepo);
     $service->getDi()['mod_service'] = $service->getDi()->protect(fn (): Mockery\MockInterface => $clientServiceMock);
@@ -199,7 +195,7 @@ test('creates a tax', function (): void {
     $em->shouldReceive('persist')
         ->once()
         ->withArgs(function (Tax $tax) use ($newId): bool {
-            $tax->setId($newId);
+            setEntityId($tax, $newId);
 
             return true;
         });

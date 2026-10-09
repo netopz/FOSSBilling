@@ -46,8 +46,11 @@ class Server_Manager_Hestia extends Server_Manager
      * Method is called just after object construct is complete.
      * Add required parameters checks here.
      */
-    public function init()
+    public function init(): void
     {
+        if (trim((string) ($this->_config['host'] ?? '')) === '') {
+            throw new Server_Exception('The HestiaCP server hostname is missing. Please configure it in the server settings.');
+        }
     }
 
     /**
@@ -375,7 +378,7 @@ class Server_Manager_Hestia extends Server_Manager
         if (str_contains($result, 'Error')) {
             throw new Server_Exception('Failed to connect to the :type: server. Please verify your credentials and configuration', [':type:' => 'HestiaCP']);
         } elseif (intval($result) !== 0) {
-            error_log("HestiaCP returned error code $result for the " . $params['cmd'] . 'command');
+            $this->getLog()->error("HestiaCP returned error code $result for the " . $params['cmd'] . ' command');
         }
 
         return $result;

@@ -27,7 +27,14 @@ class SentryHelper
      * If you modify what's reported, update this to the version number to the release that includes your changes.
      * This is important as we rely on it to inform the user that they may want to review what's been changed.
      */
-    final public const string last_change = '0.6.0';
+    final public const string last_change = '0.8.8';
+
+    /**
+     * `package@version` is required for Sentry to parse a release as semver - not composer.json's
+     * "fossbilling/fossbilling" package name, since Sentry release identifiers can't contain "/".
+     * Keep release-sentry.yml's `release:` input in sync with this.
+     */
+    private const string SENTRY_RELEASE_PACKAGE = 'fossbilling';
 
     // A full list of our own modules which we want to receive error reports for
     private const array ALLOWED_MODULES = [
@@ -44,7 +51,6 @@ class SentryHelper
         'embed',
         'extension',
         'formbuilder',
-        'hook',
         'index',
         'invoice',
         'massmailer',
@@ -72,10 +78,36 @@ class SentryHelper
         'theme',
     ];
 
-    // Themes we want to receive error reports for
+    // Themes we want to receive error reports for. extractName() (below) resolves
+    // to the top-level directory under PATH_THEMES, so 'default' alone covers
+    // default/admin, default/client, and default/shared.
     private const array ALLOWED_THEMES = [
-        'admin_default',
-        'huraga',
+        'default',
+    ];
+
+    // Base names (without the .php extension) of the registrar adapters we ship.
+    // Errors whose culprit file is an unknown adapter come from third-party
+    // adapters, which we can't fix, so they are dropped in before_send.
+    // Keep in sync with the files on disk - SentryHelperTest asserts the match.
+    private const array ALLOWED_REGISTRAR_ADAPTERS = [
+        'Custom',
+        'Email',
+        'Internetbs',
+        'Namecheap',
+        'Netearthone',
+        'Resellbiz',
+        'Resellerclub',
+        'Resellerid',
+    ];
+
+    // Same as above, for the server managers we ship.
+    private const array ALLOWED_SERVER_MANAGERS = [
+        'Custom',
+        'CWP',
+        'Directadmin',
+        'Hestia',
+        'Plesk',
+        'Whm',
     ];
 
     // Array containing instance IDs that are blacklisted from error reporting and a timestamp of when their blacklist expires.
@@ -127,6 +159,22 @@ class SentryHelper
             // We explicitly set the HTTP client to use the Symfony HTTP client to provide wider support VS their default cURL client.
             'http_client' => $httpClient,
 
+            /*
+             * Every PHP version bump deprecates a fresh batch of constants/casts/signatures, and we don't
+             * control when self-hosted instances upgrade PHP - so on an instance running ahead of our tested
+             * baseline, these fire on effectively every request, forever. `error_reporting(E_ALL)` (see
+             * load.php) means the SDK's ErrorListenerIntegration would otherwise capture E_DEPRECATED same as
+             * any other error. We deliberately keep E_USER_DEPRECATED enabled: that's our own trigger_error()
+             * calls flagging things we should investigate (see Currency\Service::getExchangeRateAPIRates()),
+             * not interpreter noise.
+             *
+             * Deliberately not also excluding E_STRICT: referencing that constant at all triggers its own
+             * "Constant E_STRICT is deprecated" notice as of PHP 8.4, and E_STRICT hasn't been a real error
+             * level PHP ever raises since 8.0 anyway (its cases were folded into E_DEPRECATED/E_WARNING), so
+             * excluding it buys nothing.
+             */
+            'error_types' => E_ALL & ~E_DEPRECATED,
+
             'before_send' => function (Event $event, ?EventHint $hint) use ($serverSoftware): ?Event {
                 $module = null;
                 $theme = null;
@@ -159,6 +207,13 @@ class SentryHelper
                     if (str_starts_with($exceptionPath, PATH_LIBRARY)) {
                         $event->setTag('library.class', self::getLibrary($exceptionPath));
                     }
+
+                    // Drop errors from third-party registrar / server adapters.
+                    // They live in the same directories as ours but we can't fix them,
+                    // so reporting them only burns quota and buries real issues.
+                    if (self::isThirdPartyAdapter($exceptionPath)) {
+                        return null;
+                    }
                 }
 
                 if (self::skipReporting($module, $theme)) {
@@ -173,13 +228,19 @@ class SentryHelper
             'ignore_exceptions' => [InformationException::class],
 
             'environment' => Environment::getCurrentEnvironment(),
-            'release' => Version::VERSION,
+
+            // Only affects releases from here on - see SENTRY_RELEASE_PACKAGE.
+            'release' => self::SENTRY_RELEASE_PACKAGE . '@' . Version::VERSION,
 
             // This option is disabled by default, but we set it to false here to be explicit & ensure it can never change unexpectedly.
             'send_default_pii' => false,
 
             // Stack traces aren't that much data to send and are valuable for us, so let's always send them.
             'attach_stacktrace' => true,
+
+            // Strips the install's own filesystem path from stack trace filenames - otherwise leaks per-install hosting details (usernames, domains) to Sentry.
+            // PATH_ROOT goes first so it always wins; the include_path entries are the SDK's own default and are kept as a fallback for paths reached via a symlinked docroot.
+            'prefixes' => [PATH_ROOT, ...array_filter(explode(PATH_SEPARATOR, get_include_path() ?: ''))],
         ];
 
         /*
@@ -221,6 +282,31 @@ class SentryHelper
     }
 
     /**
+     * Whether an exception file is a third-party adapter we don't ship.
+     *
+     * Custom registrar and server adapters live alongside ours under
+     * `library/Registrar/Adapter/` and `library/Server/Manager/`. Anything in
+     * those directories whose basename isn't in the allowlists above is
+     * third-party code, so its errors are dropped rather than reported.
+     */
+    private static function isThirdPartyAdapter(string $exceptionPath): bool
+    {
+        $directories = [
+            Path::join(PATH_LIBRARY, 'Registrar', 'Adapter') => self::ALLOWED_REGISTRAR_ADAPTERS,
+            Path::join(PATH_LIBRARY, 'Server', 'Manager') => self::ALLOWED_SERVER_MANAGERS,
+        ];
+
+        foreach ($directories as $directory => $allowed) {
+            if (str_starts_with($exceptionPath, $directory . DIRECTORY_SEPARATOR)
+                && !in_array(Path::getFilenameWithoutExtension($exceptionPath), $allowed, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Tries to guess what type of webserver is in use.
      */
     public static function estimateWebServer(string $serverSoftware = ''): string
@@ -257,10 +343,6 @@ class SentryHelper
             return true;
         }
 
-        if (Version::isPreviewVersion()) {
-            return true;
-        }
-
-        return false;
+        return Version::isPreviewVersion();
     }
 }

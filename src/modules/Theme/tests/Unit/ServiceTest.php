@@ -13,9 +13,11 @@ declare(strict_types=1);
 use Box\Mod\Extension\Entity\ExtensionMeta;
 use Box\Mod\Theme\Model;
 use Box\Mod\Theme\Service;
+use Symfony\Component\Filesystem\Path;
 
 use function Tests\Helpers\container;
 use function Tests\Helpers\injectMockFilesystem;
+use function Tests\Helpers\moduleService;
 
 function themeContainerWithRepository(Mockery\MockInterface $repository, ?Mockery\MockInterface $em = null): Pimple\Container
 {
@@ -45,7 +47,7 @@ test('getDi returns the dependency injection container', function (): void {
 
 test('getTheme returns a Theme model instance', function (): void {
     $service = new Service();
-    $result = $service->getTheme('huraga');
+    $result = $service->getTheme('default/client');
     expect($result)->toBeInstanceOf(Model\Theme::class);
 });
 
@@ -147,9 +149,6 @@ test('deletePreset removes a theme preset', function (): void {
 test('getThemePresets returns available presets', function (): void {
     $service = new Service();
     $serviceMock = Mockery::mock(Service::class)->makePartial();
-    $serviceMock->shouldReceive('updateSettings')
-        ->atLeast()
-        ->once();
 
     $repositoryMock = Mockery::mock(Box\Mod\Extension\Repository\ExtensionMetaRepository::class);
     $repositoryMock->shouldReceive('findByExtensionAndScope')
@@ -175,6 +174,8 @@ test('getThemePresets returns available presets', function (): void {
     $di = themeContainerWithRepository($repositoryMock);
     $di['theme'] = $di->protect(fn (): Mockery\MockInterface => $themeMock);
 
+    $di['mod_service']('Staff')->shouldNotReceive('checkPermissionsAndThrowException');
+    $di['em']->shouldReceive('persist')->twice()->with(Mockery::type(ExtensionMeta::class));
     $serviceMock->setDi($di);
     $result = $serviceMock->getThemePresets($themeMock, 'dark_blue');
     expect($result)->toBeArray();
@@ -233,12 +234,44 @@ test('getThemeSettings returns theme settings', function (): void {
         ->atLeast()
         ->once()
         ->andReturn('default');
+    $themeMock->shouldReceive('getPresetFromSettingsDataFile')
+        ->atLeast()
+        ->once()
+        ->andReturn([]);
 
     $di = themeContainerWithRepository($repositoryMock);
 
     $service->setDi($di);
     $result = $service->getThemeSettings($themeMock, 'default');
     expect($result)->toBeArray();
+});
+
+test('getThemeSettings fills keys missing from saved presets with shipped defaults', function (): void {
+    $service = new Service();
+    $extensionMetaModel = (new ExtensionMeta())->setMetaValue(json_encode(['custom_key' => 'saved']));
+
+    $repositoryMock = Mockery::mock(Box\Mod\Extension\Repository\ExtensionMetaRepository::class);
+    $repositoryMock->shouldReceive('findOneByExtensionAndScope')
+        ->atLeast()
+        ->once()
+        ->andReturn($extensionMetaModel);
+
+    $themeMock = Mockery::mock(Model\Theme::class);
+    $themeMock->shouldReceive('getName')
+        ->atLeast()
+        ->once()
+        ->andReturn('default');
+    $themeMock->shouldReceive('getPresetFromSettingsDataFile')
+        ->atLeast()
+        ->once()
+        ->with('default')
+        ->andReturn(['custom_key' => 'default', 'new_key' => 'default-value']);
+
+    $di = themeContainerWithRepository($repositoryMock);
+
+    $service->setDi($di);
+    $result = $service->getThemeSettings($themeMock, 'default');
+    expect($result)->toBe(['custom_key' => 'saved', 'new_key' => 'default-value']);
 });
 
 test('getThemeSettings with empty presets returns empty array', function (): void {
@@ -298,7 +331,9 @@ test('updateSettings updates theme settings', function (): void {
     $di = themeContainerWithRepository($repositoryMock, $emMock);
 
     $service->setDi($di);
-    $params = [];
+    $params = ['inject_javascript' => '<script>window.themeControl = true;</script>'];
+    $emMock->shouldReceive('persist')->with(Mockery::on(fn (ExtensionMeta $meta): bool => $meta->getMetaValue() === json_encode($params)));
+    $di['mod_service']('Staff')->shouldReceive('checkPermissionsAndThrowException')->once()->with('theme', 'manage_settings');
     $result = $service->updateSettings($themeMock, 'default', $params);
     expect($result)->toBeBool();
     expect($result)->toBeTrue();
@@ -426,7 +461,7 @@ test('getCurrentClientAreaThemeCode returns theme code', function (): void {
     $dbalMock = Mockery::mock(Doctrine\DBAL\Connection::class);
     $dbalMock->shouldReceive('fetchOne')->once()
         ->with("SELECT value FROM setting WHERE param = 'theme' ")
-        ->andReturn('huraga');
+        ->andReturn('default/client');
 
     $di = container();
     $di['dbal'] = $dbalMock;
@@ -434,7 +469,7 @@ test('getCurrentClientAreaThemeCode returns theme code', function (): void {
 
     $result = $service->getCurrentClientAreaThemeCode();
     expect($result)->toBeString();
-    expect($result)->toBe('huraga');
+    expect($result)->toBe('default/client');
 });
 
 test('getCurrentClientAreaThemeCode falls back when the setting is missing', function (): void {
@@ -449,5 +484,127 @@ test('getCurrentClientAreaThemeCode falls back when the setting is missing', fun
     $di['dbal'] = $dbalMock;
     $service->setDi($di);
 
-    expect($service->getCurrentClientAreaThemeCode())->toBe('huraga');
+    expect($service->getCurrentClientAreaThemeCode())->toBe('default/client');
+});
+
+test('getPackageSharedHtmlPath resolves the shared/html sibling for a package-shaped code', function (): void {
+    $service = new Service();
+
+    $result = $service->getPackageSharedHtmlPath('default/admin');
+    expect($result)->toBe(Path::join(PATH_THEMES, 'default', 'shared', 'html'));
+
+    $result = $service->getPackageSharedHtmlPath('default/client');
+    expect($result)->toBe(Path::join(PATH_THEMES, 'default', 'shared', 'html'));
+});
+
+test('getPackageSharedHtmlPath returns null for a flat, non-package code', function (): void {
+    $service = new Service();
+
+    expect($service->getPackageSharedHtmlPath('some-flat-theme'))->toBeNull();
+});
+
+// $layout: top-level dir name => list of relative subpaths to create as
+// directories, e.g. ['html'] for a flat theme, ['admin/html', 'client/html']
+// for a package. getThemes() enumerates a real filesystem path, so this
+// builds a temp root independent of the production `default` package.
+function makeFixtureThemesRoot(array $layout): string
+{
+    $filesystem = new Symfony\Component\Filesystem\Filesystem();
+    $root = Path::join(sys_get_temp_dir(), 'fossbilling-get-themes-test-' . bin2hex(random_bytes(8)));
+
+    foreach ($layout as $name => $subpaths) {
+        foreach ($subpaths as $subpath) {
+            $filesystem->mkdir(Path::join($root, $name, $subpath));
+        }
+    }
+
+    return $root;
+}
+
+// buildThemeConfig() (called per theme getThemes() lists) needs 'extension'
+// mod_service to return a real array from getCoreAndActiveModules(), or
+// array_unique() there would be handed null.
+function themesRootDi(): Pimple\Container
+{
+    $extensionServiceMock = Mockery::mock()->shouldIgnoreMissing();
+    $extensionServiceMock->shouldReceive('getCoreAndActiveModules')->andReturn([]);
+
+    $di = container();
+    $di['mod_service'] = $di->protect(moduleService(['extension' => $extensionServiceMock]));
+
+    return $di;
+}
+
+test('getThemes lists a package with only an admin area in the admin bucket only', function (): void {
+    $root = makeFixtureThemesRoot(['mypackage' => ['admin/html']]);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getThemesPath')->andReturn($root);
+    $serviceMock->setDi(themesRootDi());
+
+    expect(array_column($serviceMock->getThemes(false), 'code'))->toBe(['mypackage/admin']);
+    expect($serviceMock->getThemes(true))->toBe([]);
+
+    (new Symfony\Component\Filesystem\Filesystem())->remove($root);
+});
+
+test('getThemes lists a package with only a client area in the client bucket only', function (): void {
+    $root = makeFixtureThemesRoot(['mypackage' => ['client/html']]);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getThemesPath')->andReturn($root);
+    $serviceMock->setDi(themesRootDi());
+
+    expect(array_column($serviceMock->getThemes(true), 'code'))->toBe(['mypackage/client']);
+    expect($serviceMock->getThemes(false))->toBe([]);
+
+    (new Symfony\Component\Filesystem\Filesystem())->remove($root);
+});
+
+test('getThemes lists a package with both areas in both buckets', function (): void {
+    $root = makeFixtureThemesRoot(['mypackage' => ['admin/html', 'client/html']]);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getThemesPath')->andReturn($root);
+    $serviceMock->setDi(themesRootDi());
+
+    expect(array_column($serviceMock->getThemes(false), 'code'))->toBe(['mypackage/admin']);
+    expect(array_column($serviceMock->getThemes(true), 'code'))->toBe(['mypackage/client']);
+
+    (new Symfony\Component\Filesystem\Filesystem())->remove($root);
+});
+
+test('getThemes still classifies a flat theme by its name, unaffected by the package shape', function (): void {
+    $root = makeFixtureThemesRoot([
+        'my-admin-theme' => ['html'],
+        'my-client-theme' => ['html'],
+    ]);
+
+    $serviceMock = Mockery::mock(Service::class)->makePartial();
+    $serviceMock->shouldReceive('getThemesPath')->andReturn($root);
+    $serviceMock->setDi(themesRootDi());
+
+    expect(array_column($serviceMock->getThemes(false), 'code'))->toBe(['my-admin-theme']);
+    expect(array_column($serviceMock->getThemes(true), 'code'))->toBe(['my-client-theme']);
+
+    (new Symfony\Component\Filesystem\Filesystem())->remove($root);
+});
+
+test('updateSettings denies unauthorized writes before persistence', function (): void {
+    $di = container();
+    $staff = $di['mod_service']('Staff');
+    $staff->shouldReceive('checkPermissionsAndThrowException')->once()->with('theme', 'manage_settings')
+        ->andThrow(new FOSSBilling\InformationException('Permission denied', null, 403));
+    $repository = Mockery::mock(Box\Mod\Extension\Repository\ExtensionMetaRepository::class);
+    $repository->shouldNotReceive('findOneByExtensionAndScope');
+    $em = Mockery::mock(Doctrine\ORM\EntityManagerInterface::class);
+    $em->shouldReceive('getRepository')->andReturn($repository);
+    $em->shouldNotReceive('persist');
+    $em->shouldNotReceive('flush');
+    $di['em'] = $em;
+    $service = new Service();
+    $service->setDi($di);
+
+    expect(fn () => $service->updateSettings(new Model\Theme('default/client'), 'Default', ['inject_javascript' => '<script>alert(1)</script>']))
+        ->toThrow(FOSSBilling\InformationException::class, 'Permission denied', 403);
 });

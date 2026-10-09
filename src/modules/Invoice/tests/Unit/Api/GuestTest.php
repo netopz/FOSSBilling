@@ -35,20 +35,25 @@ test('gets an invoice', function (): void {
     $serviceMock->shouldReceive('toApiArray')
         ->atLeast()->once()
         ->andReturn([]);
+    $serviceMock->shouldReceive('getDebitingInvoiceIds')
+        ->atLeast()->once()
+        ->andReturn([]);
+    $serviceMock->shouldReceive('getRelatedInvoiceReferences')
+        ->atLeast()->once()
+        ->andReturn([]);
 
-    $dbMock = Mockery::mock('\Box_Database');
     $model = createEntity(Invoice::class);
 
-    $dbMock->shouldReceive('findOne')
+    $di = container();
+    $invoiceRepo = $di['em']->getRepository(Invoice::class);
+    $invoiceRepo->shouldReceive('findByHash')
         ->atLeast()->once()
         ->andReturn($model);
-
-    $di = container();
-    $di['db'] = $dbMock;
+    $serviceMock->shouldReceive('getInvoiceRepository')->andReturn($invoiceRepo);
 
     $api->setDi($di);
     $api->setService($serviceMock);
-    $api->setIdentity(new Model_Admin());
+    $api->setIdentity(\Tests\Helpers\admin());
 
     $data['hash'] = md5('1');
     $result = $api->get($data);
@@ -57,18 +62,15 @@ test('gets an invoice', function (): void {
 
 test('throws exception when invoice is not found', function (): void {
     $api = apiEndpoint(new Guest());
-    $dbMock = Mockery::mock('\Box_Database');
     $model = createEntity(Invoice::class);
 
-    $dbMock->shouldReceive('findOne')
-        ->atLeast()->once()
-        ->andReturn(null);
-
     $di = container();
-    $di['db'] = $dbMock;
+    $serviceMock = Mockery::mock(Service::class);
+    $serviceMock->shouldReceive('getInvoiceRepository')->andReturn($di['em']->getRepository(Invoice::class));
+    $api->setService($serviceMock);
 
     $api->setDi($di);
-    $api->setIdentity(new Model_Admin());
+    $api->setIdentity(\Tests\Helpers\admin());
 
     $data['hash'] = md5('1');
     expect(fn () => $api->get($data))

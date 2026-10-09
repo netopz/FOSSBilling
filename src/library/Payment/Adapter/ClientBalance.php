@@ -9,6 +9,7 @@ declare(strict_types=1);
  * @license http://www.apache.org/licenses/LICENSE-2.0 Apache-2.0
  */
 
+use Box\Mod\Client\Entity\Client;
 use Box\Mod\Invoice\Entity\Invoice;
 use Box\Mod\Invoice\Entity\PayGateway;
 
@@ -45,7 +46,7 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
 
     public function enoughInBalanceToCoverInvoice(Invoice $invoice): bool
     {
-        $clientModel = $this->di['db']->load('Client', $invoice->getClientId());
+        $clientModel = $this->di['em']->getRepository(Client::class)->find($invoice->getClientId());
         $clientBalanceService = $this->di['mod_service']('Client', 'Balance');
         $sumInBalance = $clientBalanceService->getClientBalance($clientModel);
 
@@ -91,30 +92,33 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
                 </script>";
     }
 
-    public function processTransaction($api_admin, $id, $data, $gateway_id): bool
+    public static function requiresManualApproval(): bool
+    {
+        return false;
+    }
+
+    public function processTransaction($api_admin, int $id, array $data, int $gateway_id): bool
     {
         if (!$this->isIpnValid($data)) {
             throw new Payment_Exception('IPN is invalid');
         }
 
-        $tx = $this->di['em']->getRepository(Box\Mod\Invoice\Entity\Transaction::class)->find((int) $id);
+        $tx = $this->di['em']->getRepository(Box\Mod\Invoice\Entity\Transaction::class)->find($id);
 
-        if ($tx?->getInvoiceId()) {
-            $invoice_id = $tx->getInvoiceId();
-        } else {
-            $invoice_id = $data['get']['invoice_id'] ?? 0;
+        $invoiceModel = $tx?->getInvoice();
+        $get = (isset($data['get']) && is_array($data['get'])) ? $data['get'] : [];
+        if (!$invoiceModel instanceof Invoice) {
+            $invoiceModel = $this->di['em']->getRepository(Invoice::class)->find((int) ($get['invoice_id'] ?? 0));
         }
-
-        $invoiceModel = $this->di['em']->getRepository(Invoice::class)->find($invoice_id);
         if (!$invoiceModel instanceof Invoice) {
             throw new Payment_Exception('Invoice not found');
         }
 
-        if ((int) $invoiceModel->getClientId() !== (int) $this->di['loggedin_client']->id) {
+        if ((int) $invoiceModel->getClientId() !== (int) $this->di['loggedin_client']->getId()) {
             throw new Payment_Exception('You are not authorized to pay this invoice with client balance.');
         }
 
-        if ((int) ($invoiceModel->getGatewayId() ?? 0) !== (int) $gateway_id) {
+        if (($invoiceModel->getGateway()?->getId() ?? 0) !== $gateway_id) {
             throw new Payment_Exception('Invoice is not configured to use this payment gateway.');
         }
 
@@ -123,9 +127,7 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
             throw new Payment_Exception('You may not pay a deposit invoice with this payment gateway.', [], 303);
         }
 
-        if ($invoice_id) {
-            $invoiceService->payInvoiceWithCredits($invoiceModel);
-        }
+        $invoiceService->payInvoiceWithCredits($invoiceModel);
         $invoiceService->doBatchPayWithCredits(['client_id' => $invoiceModel->getClientId()]);
 
         if ($tx instanceof Box\Mod\Invoice\Entity\Transaction) {
@@ -139,7 +141,7 @@ class Payment_Adapter_ClientBalance implements FOSSBilling\InjectionAwareInterfa
         return true;
     }
 
-    public function isIpnValid($data): bool
+    public function isIpnValid(array $data): bool
     {
         return $this->di['auth']->isClientLoggedIn();
     }

@@ -15,6 +15,8 @@ declare(strict_types=1);
 
 namespace Box\Mod\Api\Controller;
 
+use Box\Mod\Client\Entity\Client as ClientEntity;
+use Box\Mod\Staff\Entity\Admin;
 use FOSSBilling\Config;
 use FOSSBilling\Environment;
 use FOSSBilling\Http\ApiResponseFactory;
@@ -94,15 +96,33 @@ class Client implements InjectionAwareInterface
             // Sentry by default only captures unhandled exceptions, so we need to manually capture these.
             \Sentry\captureException($exc);
 
-            return $this->renderJson(null, $exc);
+            return $this->renderJson(null, $this->sanitizeGuestError($role, $class, $call, $exc));
         }
+    }
+
+    /**
+     * Guest callers get a generic message for unexpected internal failures so
+     * implementation details never leak; the original is logged for operators.
+     */
+    private function sanitizeGuestError($role, $class, $call, \Exception $exc): \Exception
+    {
+        if ($role !== 'guest' || $exc instanceof \FOSSBilling\Exception) {
+            return $exc;
+        }
+
+        $this->di['logger']->error('Guest API internal error in {call}: {exception_class}: {message}', [
+            'call' => $call,
+            'class' => $class,
+            'exception_class' => $exc::class,
+            'message' => $exc->getMessage(),
+        ]);
+
+        return new \FOSSBilling\InformationException('An unexpected error occurred. Please try again later.');
     }
 
     private function _loadConfig(): void
     {
-        if (is_null($this->apiConfig)) {
-            $this->apiConfig = Config::getProperty('api', []);
-        }
+        $this->apiConfig ??= Config::getProperty('api', []);
     }
 
     private function checkUpdateFinalization(string $role, string $class, string $method): void
@@ -116,7 +136,7 @@ class Client implements InjectionAwareInterface
     {
         $subject = (string) $this->_getIp();
 
-        if ($method === 'staff_login' || $method === 'client_login') {
+        if (($method === 'staff_login' || $method === 'client_login') && $role !== 'admin') {
             $policy = 'api_login';
         } elseif ($role === 'guest') {
             $policy = 'api_guest';
@@ -203,6 +223,7 @@ class Client implements InjectionAwareInterface
 
         $this->checkUpdateFinalization($role, $class, $method);
         $this->checkRateLimit($role, $method);
+        $this->checkGuestClientAuthentication($role, $method, $params);
 
         $api = $this->di['api_identity']($role);
         unset($params['CSRFToken']);
@@ -228,6 +249,34 @@ class Client implements InjectionAwareInterface
         }
 
         return $this->renderJson($result);
+    }
+
+    /** Login and signup can both replace the browser's client identity. */
+    private function checkGuestClientAuthentication(string $role, string $method, array $params): void
+    {
+        if ($role !== 'guest' || !in_array(strtolower($method), ['client_login', 'client_create'], true)) {
+            return;
+        }
+
+        $request = $this->di['request'];
+        if (!$request->isMethod('POST')) {
+            throw new \FOSSBilling\InformationException('Client authentication requires POST', null, 405);
+        }
+
+        // Use the pre-login session nonce, even when general API CSRF protection is disabled.
+        // Query parameters are deliberately excluded from the token sources.
+        $token = $params['CSRFToken'] ?? $request->headers->get('X-CSRF-TOKEN');
+        $sessionToken = $this->di['session']->get('csrf_token');
+        if (!is_string($token) || !is_string($sessionToken) || $sessionToken === '' || !hash_equals($sessionToken, $token)) {
+            throw new \FOSSBilling\InformationException('CSRF token invalid', null, 403);
+        }
+
+        $origin = $request->headers->get('Origin');
+        $expectedOrigin = \Symfony\Component\HttpFoundation\Request::create(SYSTEM_URL)->getSchemeAndHttpHost();
+        if (($origin !== null && strtolower($origin) !== strtolower($expectedOrigin))
+            || $request->headers->get('Sec-Fetch-Site') === 'cross-site') {
+            throw new \FOSSBilling\InformationException('Invalid request origin', null, 403);
+        }
     }
 
     private function getAuth(): array
@@ -268,29 +317,29 @@ class Client implements InjectionAwareInterface
 
         switch ($routeRole) {
             case 'client':
-                $model = $this->di['db']->findOne('Client', 'api_token = ? AND status = ?', [$password, \Model_Client::ACTIVE]);
-                if (!$model instanceof \Model_Client) {
+                $model = $this->di['em']->getRepository(ClientEntity::class)->findOneBy(['apiToken' => $password, 'status' => ClientEntity::ACTIVE]);
+                if (!$model instanceof ClientEntity) {
                     throw new \FOSSBilling\InformationException('Authentication Failed', null, 204);
                 }
-                $this->di['session']->set('client_id', $model->id);
+                $this->di['session']->set('client_id', $model->getId());
 
                 break;
 
             case 'admin':
-                $model = $this->di['db']->findOne('Admin', 'api_token = ? AND status = ? AND (system_name IS NULL OR system_name != ?)', [$password, \Model_Admin::STATUS_ACTIVE, \Model_Admin::SYSTEM_CRON]);
-                if (!$model instanceof \Model_Admin) {
+                $model = $this->di['em']->getRepository(Admin::class)->findOneBy(['apiToken' => $password, 'status' => Admin::STATUS_ACTIVE]);
+                if (!$model instanceof Admin || $model->isCron()) {
                     throw new \FOSSBilling\InformationException('Authentication Failed', null, 205);
                 }
 
                 $cronAdmin = $this->di['mod_service']('staff')->getCronAdmin();
-                if ($cronAdmin instanceof \Model_Admin && (int) $model->id === (int) $cronAdmin->id) {
+                if ((int) $model->getId() === (int) $cronAdmin->getId()) {
                     throw new \FOSSBilling\InformationException('Authentication Failed', null, 205);
                 }
 
                 $sessionAdminArray = [
-                    'id' => $model->id,
-                    'email' => $model->email,
-                    'name' => $model->name,
+                    'id' => $model->getId(),
+                    'email' => $model->getEmail(),
+                    'name' => $model->getName(),
                 ];
                 $this->di['session']->set('admin', $sessionAdminArray);
 
@@ -430,7 +479,7 @@ class Client implements InjectionAwareInterface
         $this->_loadConfig();
 
         if ($e instanceof \Exception) {
-            error_log("{$e->getMessage()} {$e->getCode()}.");
+            $this->getDi()['logger']->error("{$e->getMessage()} {$e->getCode()}.");
         }
 
         return (new ApiResponseFactory())->create($data, $e);
