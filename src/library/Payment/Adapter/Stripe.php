@@ -1442,9 +1442,14 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      * critically, both stamp the invoice_id/client_id/gateway_id metadata the
      * webhook (ipn.php) relies on to mark the invoice paid.
      *
+     * When $manualCapture is true (domain registration invoices), Stripe holds
+     * funds (requires_capture) until FOSSBilling captures after registrar
+     * success — or an admin captures later. Authorization holds typically last
+     * ~7 days for cards.
+     *
      * @return array{0: array, 1: string}
      */
-    private function _oneTimeIntentParams(Invoice $invoice): array
+    private function _oneTimeIntentParams(Invoice $invoice, bool $manualCapture = false): array
     {
         $intentParams = [
             'amount' => $this->getAmountInMinorUnits($invoice),
@@ -1458,6 +1463,11 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
                 'gateway_id' => (string) $this->config['gateway_id'],
             ],
         ];
+        if ($manualCapture) {
+            $intentParams['capture_method'] = 'manual';
+            $intentParams['metadata']['manual_capture'] = '1';
+            $intentParams['metadata']['provision_before_capture'] = '1';
+        }
         $idempotencyKey = sprintf(
             'one_time_invoice_%d_gateway_%d_%s',
             $invoice->getId(),
@@ -1484,12 +1494,25 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
      * (client paid, webhook never marked the invoice), reconcile immediately
      * and return already_paid so the SPA does not call confirmPayment again.
      *
-     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int, already_paid?: bool, payment_intent_id?: string}
+     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int, already_paid?: bool, payment_intent_id?: string, capture_method?: string}
      */
-    public function createInvoicePaymentIntent(Invoice $invoice): array
+    public function createInvoicePaymentIntent(Invoice $invoice, bool $manualCapture = false): array
     {
-        [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice);
-        $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
+        [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice, $manualCapture);
+        try {
+            $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
+        } catch (Throwable $e) {
+            // Fallback: some payment methods / account settings reject manual
+            // capture — charge immediately and let staff refund if needed.
+            if ($manualCapture) {
+                error_log('Stripe manual capture PI create failed, falling back to automatic: ' . $e->getMessage());
+                [$intentParams, $idempotencyKey] = $this->_oneTimeIntentParams($invoice, false);
+                $intent = $this->stripe->paymentIntents->create($intentParams, ['idempotency_key' => $idempotencyKey]);
+                $manualCapture = false;
+            } else {
+                throw $e;
+            }
+        }
 
         $testMode = (bool) ($this->config['test_mode'] ?? false);
         $pubKey = $testMode ? ($this->config['test_pub_key'] ?? '') : ($this->config['pub_key'] ?? '');
@@ -1505,6 +1528,7 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
                 'gateway_id' => $gatewayId,
                 'already_paid' => true,
                 'payment_intent_id' => (string) $intent->id,
+                'capture_method' => $manualCapture ? 'manual' : 'automatic',
             ];
         }
 
@@ -1513,7 +1537,214 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface
             'publishable_key' => (string) $pubKey,
             'test_mode' => $testMode,
             'gateway_id' => $gatewayId,
+            'payment_intent_id' => (string) $intent->id,
+            'capture_method' => $manualCapture ? 'manual' : 'automatic',
         ];
+    }
+
+    /**
+     * After the customer authorizes a manual-capture PaymentIntent, try domain
+     * (and other) provisioning first. Capture only when provisioning succeeds.
+     * If the registrar blocks registration, leave funds held (requires_capture)
+     * and return needs_admin so staff can Activate then Capture — without
+     * charging the customer yet.
+     *
+     * @return array{
+     *   success: bool,
+     *   status: string,
+     *   payment_intent_id: string,
+     *   payment_intent_status: string,
+     *   authorized?: bool,
+     *   captured?: bool,
+     *   needs_admin?: bool,
+     *   provision_error?: string
+     * }
+     */
+    public function finalizeAuthorizedPaymentIntent(Invoice $invoice, string $paymentIntentId): array
+    {
+        $intent = $this->stripe->paymentIntents->retrieve($paymentIntentId);
+        $piStatus = (string) ($intent->status ?? '');
+        $gatewayId = (int) $this->config['gateway_id'];
+
+        $metaInvoiceId = (string) ($intent->metadata->invoice_id ?? '');
+        if ($metaInvoiceId !== '' && (int) $metaInvoiceId !== (int) $invoice->getId()) {
+            throw new Payment_Exception('PaymentIntent does not belong to this invoice.');
+        }
+
+        if ($piStatus === 'succeeded') {
+            $this->reconcileSucceededPaymentIntent($intent, $gatewayId);
+            $fresh = $this->di['em']->getRepository(Invoice::class)->find($invoice->getId());
+
+            return [
+                'success' => $fresh instanceof Invoice && $fresh->getStatus() === Invoice::STATUS_PAID,
+                'status' => $fresh instanceof Invoice ? (string) $fresh->getStatus() : (string) $invoice->getStatus(),
+                'payment_intent_id' => $paymentIntentId,
+                'payment_intent_status' => 'succeeded',
+                'captured' => true,
+            ];
+        }
+
+        if ($piStatus !== 'requires_capture') {
+            return [
+                'success' => false,
+                'status' => (string) $invoice->getStatus(),
+                'payment_intent_id' => $paymentIntentId,
+                'payment_intent_status' => $piStatus,
+                'authorized' => false,
+                'captured' => false,
+            ];
+        }
+
+        // Hold is in place — attempt registrar provisioning before charging.
+        $provision = $this->provisionInvoiceOrdersBeforeCapture($invoice);
+        if (!$provision['ok']) {
+            $this->rememberAuthorizedPaymentIntent($invoice, $paymentIntentId, (string) ($provision['error'] ?? 'provision failed'));
+
+            return [
+                'success' => true, // checkout must not reject the customer
+                'status' => (string) $invoice->getStatus(), // still unpaid
+                'payment_intent_id' => $paymentIntentId,
+                'payment_intent_status' => 'requires_capture',
+                'authorized' => true,
+                'captured' => false,
+                'needs_admin' => true,
+                'provision_error' => (string) ($provision['error'] ?? 'Domain registration could not be completed automatically.'),
+            ];
+        }
+
+        try {
+            $captured = $this->stripe->paymentIntents->capture($paymentIntentId);
+        } catch (Throwable $e) {
+            error_log('Stripe capture failed after successful provision for invoice ' . $invoice->getId() . ': ' . $e->getMessage());
+            $this->rememberAuthorizedPaymentIntent($invoice, $paymentIntentId, 'capture_failed_after_provision: ' . $e->getMessage());
+
+            return [
+                'success' => true,
+                'status' => (string) $invoice->getStatus(),
+                'payment_intent_id' => $paymentIntentId,
+                'payment_intent_status' => 'requires_capture',
+                'authorized' => true,
+                'captured' => false,
+                'needs_admin' => true,
+                'provision_error' => 'Domain was registered but payment capture failed — staff must capture PaymentIntent ' . $paymentIntentId,
+            ];
+        }
+
+        $this->reconcileSucceededPaymentIntent($captured, $gatewayId);
+        $fresh = $this->di['em']->getRepository(Invoice::class)->find($invoice->getId());
+
+        return [
+            'success' => $fresh instanceof Invoice && $fresh->getStatus() === Invoice::STATUS_PAID,
+            'status' => $fresh instanceof Invoice ? (string) $fresh->getStatus() : (string) $invoice->getStatus(),
+            'payment_intent_id' => $paymentIntentId,
+            'payment_intent_status' => (string) ($captured->status ?? 'succeeded'),
+            'authorized' => true,
+            'captured' => true,
+            'needs_admin' => false,
+        ];
+    }
+
+    /**
+     * Admin path: capture a held PaymentIntent and mark the invoice paid
+     * (runs normal post-pay activate for any remaining pending orders).
+     *
+     * @return array{success: bool, status: string, payment_intent_id: string, payment_intent_status: string}
+     */
+    public function captureAuthorizedPaymentIntent(Invoice $invoice, string $paymentIntentId): array
+    {
+        $intent = $this->stripe->paymentIntents->retrieve($paymentIntentId);
+        $piStatus = (string) ($intent->status ?? '');
+        $gatewayId = (int) $this->config['gateway_id'];
+
+        if ($piStatus === 'succeeded') {
+            $this->reconcileSucceededPaymentIntent($intent, $gatewayId);
+        } elseif ($piStatus === 'requires_capture') {
+            $captured = $this->stripe->paymentIntents->capture($paymentIntentId);
+            $this->reconcileSucceededPaymentIntent($captured, $gatewayId);
+            $piStatus = (string) ($captured->status ?? 'succeeded');
+        } else {
+            throw new Payment_Exception('PaymentIntent is not capturable (status: ' . $piStatus . ')');
+        }
+
+        $fresh = $this->di['em']->getRepository(Invoice::class)->find($invoice->getId());
+
+        return [
+            'success' => $fresh instanceof Invoice && $fresh->getStatus() === Invoice::STATUS_PAID,
+            'status' => $fresh instanceof Invoice ? (string) $fresh->getStatus() : (string) $invoice->getStatus(),
+            'payment_intent_id' => $paymentIntentId,
+            'payment_intent_status' => $piStatus === 'succeeded' ? 'succeeded' : $piStatus,
+        ];
+    }
+
+    /**
+     * Activate pending/failed orders linked to this invoice before capturing.
+     *
+     * @return array{ok: bool, error?: string}
+     */
+    private function provisionInvoiceOrdersBeforeCapture(Invoice $invoice): array
+    {
+        $itemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
+        $orderService = $this->di['mod_service']('order');
+        $items = $this->di['em']->getRepository(\Box\Mod\Invoice\Entity\InvoiceItem::class)
+            ->findByInvoiceId((int) $invoice->getId());
+
+        $errors = [];
+        foreach ($items as $item) {
+            try {
+                $orderId = $itemService->getOrderId($item);
+            } catch (Throwable) {
+                continue;
+            }
+            if ($orderId <= 0) {
+                continue;
+            }
+            $order = $this->di['db']->load('ClientOrder', $orderId);
+            if (!$order instanceof \Model_ClientOrder) {
+                continue;
+            }
+            $status = (string) ($order->status ?? '');
+            if (!in_array($status, ['pending_setup', 'failed_setup', 'pending'], true)) {
+                continue;
+            }
+            try {
+                $orderService->activateOrder($order);
+            } catch (Throwable $e) {
+                $errors[] = 'Order #' . $orderId . ': ' . $e->getMessage();
+                try {
+                    $orderService->saveStatusChange($order, 'Pre-capture activate failed: ' . $e->getMessage());
+                } catch (Throwable) {
+                    // ignore
+                }
+            }
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'error' => implode('; ', $errors)];
+        }
+
+        return ['ok' => true];
+    }
+
+    private function rememberAuthorizedPaymentIntent(Invoice $invoice, string $paymentIntentId, string $reason): void
+    {
+        $stamp = sprintf(
+            "\n[stripe_authorized:%s] %s — %s",
+            $paymentIntentId,
+            date('c'),
+            $reason
+        );
+        $notes = (string) ($invoice->getNotes() ?? '');
+        if (!str_contains($notes, 'stripe_authorized:' . $paymentIntentId)) {
+            $invoice->setNotes(trim($notes . $stamp));
+            $this->di['em']->persist($invoice);
+            $this->di['em']->flush();
+        }
+        error_log(sprintf(
+            'Invoice #%d authorized (not captured) PI=%s reason=%s',
+            $invoice->getId(),
+            $paymentIntentId,
+            $reason
+        ));
     }
 
     /**

@@ -1903,13 +1903,47 @@ class Service implements InjectionAwareInterface
     }
 
     /**
+     * True when this invoice includes a domain order that needs registrar
+     * provisioning (register/transfer). Those invoices use Stripe manual
+     * capture so funds are held until registration succeeds (or staff captures).
+     */
+    public function invoiceRequiresManualCapture(Invoice $invoice): bool
+    {
+        $itemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
+        $items = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->getId());
+        foreach ($items as $item) {
+            try {
+                $orderId = $itemService->getOrderId($item);
+            } catch (\Throwable) {
+                continue;
+            }
+            if ($orderId <= 0) {
+                continue;
+            }
+            $order = $this->di['db']->load('ClientOrder', $orderId);
+            if (!$order instanceof \Model_ClientOrder) {
+                continue;
+            }
+            $serviceType = strtolower((string) ($order->service_type ?? ''));
+            if ($serviceType === 'domain' || $serviceType === 'servicedomain') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Create a Stripe PaymentIntent for an invoice for the headless (SPA)
      * pay flow and return the client_secret + publishable key. The Stripe
      * webhook (ipn.php) marks the invoice paid, so no Transaction is created
      * here — the invoice_id metadata on the PaymentIntent is what links the
      * webhook back to this invoice.
      *
-     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int}
+     * Domain invoices request capture_method=manual so authorization holds
+     * funds until registrar provisioning succeeds (or an admin captures).
+     *
+     * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int, capture_method?: string}
      */
     public function createStripePaymentIntent(Invoice $invoice, ?int $gatewayId = null): array
     {
@@ -1924,15 +1958,20 @@ class Service implements InjectionAwareInterface
             throw new InformationException('The configured Stripe gateway does not support direct PaymentIntents', null, 819);
         }
 
-        return $adapter->createInvoicePaymentIntent($invoice);
+        $manualCapture = $this->invoiceRequiresManualCapture($invoice);
+
+        return $adapter->createInvoicePaymentIntent($invoice, $manualCapture);
     }
 
     /**
-     * Reconcile a Stripe PaymentIntent that already succeeded into FOSSBilling
-     * (mark invoice paid + record transaction). Used when the SPA confirms
-     * payment client-side and the webhook has not arrived yet — or never will.
+     * Reconcile a Stripe PaymentIntent after SPA confirmPayment().
      *
-     * @return array{success: bool, status: string, payment_intent_id: string}
+     * - Automatic capture (succeeded): mark invoice paid as before.
+     * - Manual capture (requires_capture): try domain activate first; capture
+     *   only on success. On registrar failure, leave the hold and return
+     *   needs_admin without charging.
+     *
+     * @return array{success: bool, status: string, payment_intent_id: string, authorized?: bool, captured?: bool, needs_admin?: bool, provision_error?: string}
      */
     public function reconcileStripePaymentIntent(Invoice $invoice, string $paymentIntentId, ?int $gatewayId = null): array
     {
@@ -1946,12 +1985,19 @@ class Service implements InjectionAwareInterface
                 'success' => true,
                 'status' => Invoice::STATUS_PAID,
                 'payment_intent_id' => $paymentIntentId,
+                'captured' => true,
             ];
         }
 
         $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
         $gtw = $this->resolveEnabledStripeGateway($gatewayId);
         $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
+
+        // Prefer authorize→provision→capture when the adapter supports it.
+        if (method_exists($adapter, 'finalizeAuthorizedPaymentIntent')) {
+            return $adapter->finalizeAuthorizedPaymentIntent($invoice, $paymentIntentId);
+        }
+
         if (!method_exists($adapter, 'reconcilePaymentIntentById')) {
             throw new InformationException('The configured Stripe gateway does not support PaymentIntent reconciliation', null, 821);
         }
@@ -1965,7 +2011,30 @@ class Service implements InjectionAwareInterface
             'success' => $status === Invoice::STATUS_PAID,
             'status' => (string) $status,
             'payment_intent_id' => $paymentIntentId,
+            'captured' => $status === Invoice::STATUS_PAID,
         ];
+    }
+
+    /**
+     * Admin: capture a previously authorized PaymentIntent and mark paid.
+     *
+     * @return array{success: bool, status: string, payment_intent_id: string, payment_intent_status?: string}
+     */
+    public function captureAuthorizedStripePayment(Invoice $invoice, string $paymentIntentId, ?int $gatewayId = null): array
+    {
+        $paymentIntentId = trim($paymentIntentId);
+        if ($paymentIntentId === '' || !str_starts_with($paymentIntentId, 'pi_')) {
+            throw new InformationException('A valid Stripe PaymentIntent id is required', null, 820);
+        }
+
+        $payGatewayService = $this->di['mod_service']('Invoice', 'PayGateway');
+        $gtw = $this->resolveEnabledStripeGateway($gatewayId);
+        $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
+        if (!method_exists($adapter, 'captureAuthorizedPaymentIntent')) {
+            throw new InformationException('The configured Stripe gateway does not support authorized capture', null, 822);
+        }
+
+        return $adapter->captureAuthorizedPaymentIntent($invoice, $paymentIntentId);
     }
 
     /**

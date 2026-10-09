@@ -1606,6 +1606,22 @@ class Service implements InjectionAwareInterface
                 $order->suspension_grace_days = $graceDays;
             }
         }
+        // Allow API callers (middleware combined checkout) to link orders to a
+        // prepared unpaid invoice — previously ignored, causing orphan invoices.
+        if (array_key_exists('unpaid_invoice_id', $data)) {
+            $rawUnpaid = $data['unpaid_invoice_id'];
+            $unpaidId = ($rawUnpaid === '' || $rawUnpaid === null)
+                ? null
+                : (int) $rawUnpaid;
+            if ($unpaidId !== null && $unpaidId <= 0) {
+                $unpaidId = null;
+            }
+            if ($order instanceof Order) {
+                $order->setUnpaidInvoiceId($unpaidId);
+            } else {
+                $order->unpaid_invoice_id = $unpaidId;
+            }
+        }
         if ($order instanceof Order) {
             $order->setNotes($notes);
             $order->setReason($reason);

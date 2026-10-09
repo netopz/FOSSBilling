@@ -123,6 +123,14 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         return str_starts_with($status, 'AVAILABLE') || $status === 'OK';
     }
 
+    /** @var array<string, mixed> Order/product config (AU eligibility, etc.) set by Servicedomain activate. */
+    private array $orderConfig = [];
+
+    public function setOrderConfig(array $config): void
+    {
+        $this->orderConfig = $config;
+    }
+
     public function registerDomain(Registrar_Domain $domain): bool
     {
         $nameservers = $this->nameservers($domain);
@@ -130,14 +138,42 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
             throw new Registrar_Exception('At least two nameservers are required to register a domain with Synergy Wholesale.');
         }
 
-        // domainRegister expects unprefixed contact fields (matches Synergy API / middleware).
+        // SoapClient WSDL encoding requires every contact field including empty fax.
+        $contact = $this->contactFields($domain->getContactRegistrar(), $domain);
+
+        // .au / .com.au / .net.au use dedicated domainRegisterAU (eligibility as top-level fields).
+        if (str_ends_with(strtolower((string) $domain->getName()), '.au')) {
+            $eligibility = $this->auEligibilityPayload($domain) ?? [];
+            $params = [
+                'domainName' => $domain->getName(),
+                'years' => (string) ($domain->getRegistrationPeriod() ?: 1),
+                'nameServers' => $nameservers,
+                ...$this->prefixContactFields($contact, 'registrant'),
+                ...$this->prefixContactFields($contact, 'technical'),
+                'registrantName' => (string) ($eligibility['registrantName'] ?? $eligibility['eligibilityName'] ?? ''),
+                'registrantID' => (string) ($eligibility['eligibilityId'] ?? ''),
+                'registrantIDType' => (string) ($eligibility['eligibilityIdType'] ?? ''),
+                'eligibilityName' => (string) ($eligibility['eligibilityName'] ?? $eligibility['registrantName'] ?? ''),
+                'eligibilityType' => (string) ($eligibility['eligibilityType'] ?? ''),
+                'eligibilityID' => (string) ($eligibility['eligibilityId'] ?? ''),
+                'eligibilityIDType' => (string) ($eligibility['eligibilityIdType'] ?? ''),
+            ];
+            $this->call('domainRegisterAU', $params);
+
+            return true;
+        }
+
+        // domainRegister WSDL requires registrant_/admin_/technical_/billing_ prefixes.
         $params = [
             'domainName' => $domain->getName(),
-            'years' => $domain->getRegistrationPeriod() ?: 1,
+            'years' => (string) ($domain->getRegistrationPeriod() ?: 1),
             'nameServers' => $nameservers,
-            'idProtect' => (bool) $domain->getPrivacyEnabled(),
+            'idProtect' => $domain->getPrivacyEnabled() ? '1' : '0',
             'specialConditionsAgree' => true,
-            ...$this->contactFields($domain->getContactRegistrar(), $domain),
+            ...$this->prefixContactFields($contact, 'registrant'),
+            ...$this->prefixContactFields($contact, 'admin'),
+            ...$this->prefixContactFields($contact, 'technical'),
+            ...$this->prefixContactFields($contact, 'billing'),
         ];
 
         $this->call('domainRegister', $params);
@@ -587,7 +623,9 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
             // Pass the fields directly — wrapping as ['request' => ...] fails PHP SoapClient encoding.
             $result = $this->client()->__soapCall($method, [$request]);
         } catch (Throwable $e) {
-            $this->getLog()->error(sprintf('Synergy Wholesale API transport error on %s: %s', $method, $e->getMessage()));
+            $msg = sprintf('Synergy Wholesale API transport error on %s: %s', $method, $e->getMessage());
+            $this->getLog()?->error($msg);
+            error_log($msg);
             throw new Registrar_Exception('Failed to call :action with the :type registrar, check the error logs for further details', [':action' => $method, ':type' => 'Synergy Wholesale']);
         }
 
@@ -615,8 +653,56 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
     }
 
     /**
-     * Unprefixed contact fields used by domainRegister / transferDomain.
-     * For updateContact, callers prefix with registrant_|admin_|technical_|billing_.
+     * Build Synergy eligibility object from order config / contact for AU TLDs.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function auEligibilityPayload(Registrar_Domain $domain): ?array
+    {
+        $name = strtolower((string) $domain->getName());
+        $isAu = str_ends_with($name, '.au');
+        $cfg = $this->orderConfig;
+        $hasEligibility = !empty($cfg['Eligibility Type'])
+            || !empty($cfg['eligibility_type'])
+            || !empty($cfg['EligibilityName'])
+            || !empty($cfg['Eligibility Name']);
+        if (!$isAu && !$hasEligibility) {
+            return null;
+        }
+
+        $contact = $domain->getContactRegistrar();
+        $registrantName = trim((string) (
+            $cfg['Eligibility Name']
+            ?? $cfg['eligibility_name']
+            ?? $cfg['Business Name']
+            ?? ($contact?->getCompany() ?: trim(($contact?->getFirstName() ?? '') . ' ' . ($contact?->getLastName() ?? '')))
+            ?? ''
+        ));
+
+        $eligibilityType = (string) ($cfg['Eligibility Type'] ?? $cfg['eligibility_type'] ?? 'Company');
+        $eligibilityId = preg_replace('/\s+/', '', (string) ($cfg['Eligibility ID'] ?? $cfg['eligibility_id'] ?? $cfg['Business ID'] ?? ''));
+        $eligibilityIdType = (string) ($cfg['Eligibility ID Type'] ?? $cfg['eligibility_id_type'] ?? $cfg['Business ID Type'] ?? '');
+        // Normalise common labels Synergy expects (ACN / ABN).
+        if (stripos($eligibilityIdType, 'ACN') !== false) {
+            $eligibilityIdType = 'ACN';
+        } elseif (stripos($eligibilityIdType, 'ABN') !== false) {
+            $eligibilityIdType = 'ABN';
+        }
+
+        $payload = array_filter([
+            'registrantName' => $registrantName !== '' ? $registrantName : null,
+            'eligibilityType' => $eligibilityType !== '' ? $eligibilityType : null,
+            'eligibilityName' => $registrantName !== '' ? $registrantName : null,
+            'eligibilityId' => $eligibilityId !== '' ? $eligibilityId : null,
+            'eligibilityIdType' => $eligibilityIdType !== '' ? $eligibilityIdType : null,
+            'eligibilityReason' => $cfg['Eligibility Reason'] ?? $cfg['eligibility_reason'] ?? null,
+        ], static fn ($v) => $v !== null && $v !== '');
+
+        return $payload !== [] ? $payload : null;
+    }
+
+    /**
+     * Unprefixed contact fields; use prefixContactFields() for domainRegister WSDL.
      *
      * @return array<string, mixed>
      */
@@ -629,21 +715,38 @@ class Registrar_Adapter_Synergy extends Registrar_AdapterAbstract
         $country = strtoupper((string) $contact->getCountry());
         $state = $this->normaliseState((string) $contact->getState(), $country, $domain);
 
+        // Keep address as two entries (SoapClient addressArray); empty line2 is fine.
+        $address1 = (string) $contact->getAddress1();
+        $address2 = (string) $contact->getAddress2();
+
         return [
+            'organisation' => (string) $contact->getCompany(),
             'firstname' => (string) $contact->getFirstName(),
             'lastname' => (string) $contact->getLastName(),
-            'email' => (string) $contact->getEmail(),
-            'phone' => $this->formatPhone($contact, $country),
-            'address' => array_values(array_filter([
-                (string) $contact->getAddress1(),
-                (string) $contact->getAddress2(),
-            ], static fn ($line) => $line !== '')),
+            'address' => [$address1 !== '' ? $address1 : 'N/A', $address2],
             'suburb' => (string) $contact->getCity(),
             'state' => $state,
-            'postcode' => (string) $contact->getZip(),
             'country' => $country,
-            'organisation' => (string) $contact->getCompany(),
+            'postcode' => (string) $contact->getZip(),
+            'phone' => $this->formatPhone($contact, $country),
+            // Required by Synergy WSDL encoding even when unused.
+            'fax' => '',
+            'email' => (string) $contact->getEmail(),
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    private function prefixContactFields(array $fields, string $prefix): array
+    {
+        $out = [];
+        foreach ($fields as $key => $value) {
+            $out[$prefix . '_' . $key] = $value;
+        }
+
+        return $out;
     }
 
     private function formatPhone(Registrar_Domain_Contact $contact, string $country): string

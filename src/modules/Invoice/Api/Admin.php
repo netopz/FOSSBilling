@@ -119,13 +119,15 @@ class Admin extends \FOSSBilling\Api\AbstractApi
     }
 
     /**
-     * Reconcile a succeeded Stripe PaymentIntent onto an invoice without
-     * waiting for ipn.php. Called by the Vioflare SPA after confirmPayment()
-     * so a missing/misconfigured Stripe webhook cannot leave the invoice unpaid.
+     * Reconcile a Stripe PaymentIntent onto an invoice without waiting for
+     * ipn.php. Called by the Vioflare SPA after confirmPayment().
+     *
+     * For domain invoices (manual capture): provisions first, captures only on
+     * success; otherwise leaves an authorization hold for staff.
      *
      * @optional int $gateway_id - Stripe pay gateway id. Auto-detected when omitted.
      *
-     * @return array{success: bool, status: string, payment_intent_id: string}
+     * @return array{success: bool, status: string, payment_intent_id: string, authorized?: bool, captured?: bool, needs_admin?: bool}
      */
     #[RequiredParams([
         'id' => 'Invoice ID is missing',
@@ -138,6 +140,30 @@ class Admin extends \FOSSBilling\Api\AbstractApi
         $invoice = $this->_getInvoice($data);
 
         return $this->getService()->reconcileStripePaymentIntent(
+            $invoice,
+            (string) $data['payment_intent_id'],
+            $data['gateway_id'] ?? null
+        );
+    }
+
+    /**
+     * Capture a previously authorized (manual-capture) Stripe PaymentIntent and
+     * mark the invoice paid. Used by staff after fixing a failed domain
+     * registration (Activate order, then capture).
+     *
+     * @optional int $gateway_id - Stripe pay gateway id. Auto-detected when omitted.
+     */
+    #[RequiredParams([
+        'id' => 'Invoice ID is missing',
+        'payment_intent_id' => 'Stripe PaymentIntent ID is missing',
+    ])]
+    public function stripe_capture_authorized($data)
+    {
+        $this->checkPermissions('invoice', 'manage_invoices');
+
+        $invoice = $this->_getInvoice($data);
+
+        return $this->getService()->captureAuthorizedStripePayment(
             $invoice,
             (string) $data['payment_intent_id'],
             $data['gateway_id'] ?? null

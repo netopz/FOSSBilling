@@ -263,14 +263,41 @@ class Service implements \FOSSBilling\InjectionAwareInterface
     public function action_activate(\Model_ClientOrder $order): ServiceDomain
     {
         $model = $this->_getOrderService($order);
+        $orderService = $this->di['mod_service']('order');
+        $orderConfig = $orderService->getConfig($order);
+        if (!is_array($orderConfig)) {
+            $orderConfig = [];
+        }
+
+        // If a prior failed renew/activate cleared action, restore from order config.
+        $action = $model->getAction();
+        if (empty($action) && !empty($orderConfig['action'])) {
+            $action = (string) $orderConfig['action'];
+            $model->setAction($action);
+            $this->di['em']->flush();
+        }
+
+        // Ensure nameservers exist before Synergy register (system defaults + order config).
+        $systemService = $this->di['mod_service']('system');
+        $ns = $systemService->getNameservers() ?: [];
+        if (empty($model->getNs1())) {
+            $model->setNs1($orderConfig['ns1'] ?? ($ns['nameserver_1'] ?? null));
+        }
+        if (empty($model->getNs2())) {
+            $model->setNs2($orderConfig['ns2'] ?? ($ns['nameserver_2'] ?? null));
+        }
+        $this->di['em']->flush();
 
         // @adapterAction
         [$domain, $adapter] = $this->_getD($model);
-        if ($model->getAction() == 'register') {
+        if (method_exists($adapter, 'setOrderConfig')) {
+            $adapter->setOrderConfig($orderConfig);
+        }
+        if ($action == 'register' || $model->getAction() == 'register') {
             $adapter->registerDomain($domain);
         }
 
-        if ($model->getAction() == 'transfer') {
+        if ($action == 'transfer' || $model->getAction() == 'transfer') {
             $adapter->transferDomain($domain);
         }
 
@@ -1340,6 +1367,10 @@ class Service implements \FOSSBilling\InjectionAwareInterface
         $s->setPrivacy((bool) ($data['privacy'] ?? $s->getPrivacy()));
         $s->setLocked((bool) ($data['locked'] ?? $s->isLocked()));
         $s->setTransferCode($data['transfer_code'] ?? $s->getTransferCode());
+        if (array_key_exists('action', $data)) {
+            $action = $data['action'];
+            $s->setAction(($action === '' || $action === null) ? null : (string) $action);
+        }
 
         $this->di['em']->flush();
 
