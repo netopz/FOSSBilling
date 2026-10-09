@@ -89,19 +89,27 @@ jobs:
             set -euo pipefail
             TARGET="/var/www/billing.vioflare.com"
             mkdir -p "${TARGET}/data/log" "${TARGET}/data/cache" "${TARGET}/data/uploads"
-            # Never leave the installer web-accessible after rsync --delete
-            rm -rf "${TARGET}/install"
+            mkdir -p "${TARGET}/themes/default/client/config" "${TARGET}/themes/huraga/config"
+            # Never leave the installer web-accessible after rsync --delete.
+            # Use sudo: rsync -o can leave install/ owned in ways deploy alone cannot remove.
+            sudo rm -rf "${TARGET}/install"
             # Theme settings are gitignored; restore from example if missing
             HURAGA_SETTINGS="${TARGET}/themes/huraga/config/settings_data.json"
             HURAGA_EXAMPLE="${TARGET}/themes/huraga/config/settings_data.json.example"
             if [[ ! -f "${HURAGA_SETTINGS}" && -f "${HURAGA_EXAMPLE}" ]]; then
               cp "${HURAGA_EXAMPLE}" "${HURAGA_SETTINGS}"
             fi
+            # www-data must own/write data + themes before run-patcher: update finalization
+            # copies huraga settings_data.json into themes/default/client/config/.
             sudo chown -R www-data:www-data "${TARGET}"
+            sudo chown -R www-data:www-data "${TARGET}/data" "${TARGET}/themes"
             sudo chmod g+w "${TARGET}" || true
             sudo chmod 664 "${TARGET}/config.php" "${TARGET}/config.old.php" 2>/dev/null || true
-            sudo find "${TARGET}/data" -type d -exec chmod 775 {} \;
+            sudo find "${TARGET}/data" "${TARGET}/themes" -type d -exec chmod 775 {} \;
             sudo find "${TARGET}/data/log" "${TARGET}/data/cache" "${TARGET}/data/uploads" -type d -exec chmod 775 {} \;
+            sudo -u www-data test -w "${TARGET}/data/cache"
+            sudo -u www-data test -w "${TARGET}/themes/default/client/config"
+            test ! -e "${TARGET}/install"
             # Apply DB/config patches after code deploy (Doctrine upgrades, etc.)
             if [[ -f "${TARGET}/console.php" ]]; then
               sudo -u www-data php "${TARGET}/console.php" system:run-patcher || true
