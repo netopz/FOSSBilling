@@ -110,9 +110,12 @@ jobs:
             sudo -u www-data test -w "${TARGET}/data/cache"
             sudo -u www-data test -w "${TARGET}/themes/default/client/config"
             test ! -e "${TARGET}/install"
-            # Apply DB/config patches after code deploy (Doctrine upgrades, etc.)
+            # Apply DB/config patches after code deploy (Doctrine upgrades, etc.).
+            # Prefer php8.3: default `php` on this host is 8.4 without pdo_mysql,
+            # which leaves update finalization pending and blocks admin API.
             if [[ -f "${TARGET}/console.php" ]]; then
-              sudo -u www-data php "${TARGET}/console.php" system:run-patcher || true
+              PHP_BIN="$(command -v php8.3 || command -v php)"
+              sudo -u www-data "${PHP_BIN}" "${TARGET}/console.php" system:run-patcher || true
             fi
             echo "Deploy complete: ${TARGET}"
             ls -la "${TARGET}" | head -30
