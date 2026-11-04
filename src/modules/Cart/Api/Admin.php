@@ -140,6 +140,14 @@ class Admin extends \FOSSBilling\Api\AbstractApi
 
         unset($data['client_id'], $data['price']);
 
+        // Flatten nested config[] into top-level so admin basket domain Register
+        // (config[action]) reaches validateOrderData via addItem.
+        if (isset($data['config']) && is_array($data['config'])) {
+            $config = $data['config'];
+            unset($data['config']);
+            $data = array_merge($data, $config);
+        }
+
         return $this->getService()->addItem($basket, $product, $data, $priceOverride);
     }
 

@@ -4026,11 +4026,11 @@ class Service implements InjectionAwareInterface
             if ($orderId <= 0) {
                 continue;
             }
-            $order = $this->di['db']->load('ClientOrder', $orderId);
-            if (!$order instanceof \Model_ClientOrder) {
+            $order = $this->di['em']->getRepository(Order::class)->find($orderId);
+            if (!$order instanceof Order) {
                 continue;
             }
-            $serviceType = strtolower((string) ($order->service_type ?? ''));
+            $serviceType = strtolower((string) ($order->getServiceType() ?? ''));
             if ($serviceType === 'domain' || $serviceType === 'servicedomain') {
                 return true;
             }

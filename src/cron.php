@@ -27,18 +27,19 @@ try {
     $interval = $argv[1] ?? null;
     $service = $di['mod_service']('cron');
 
-    if (Environment::isCLI()) {
-        echo "\e[33m- Welcome to FOSSBilling.\n";
-        echo "\e[34mLast executed: {$service->getLastExecutionTime()}.\e[0m";
-    }
+    // Do not echo before runCrons(): Symfony NativeSessionStorage cannot start after
+    // output (CLI welcome banners). Capture last-exec for the summary printed after.
+    $lastExecBefore = $service->getLastExecutionTime();
 
     $success = $service->runCrons($interval);
 } catch (Exception $exception) {
     throw new Exception($exception->getMessage(), $exception->getCode(), $exception);
 } finally {
     if (Environment::isCLI()) {
+        echo "\e[33m- Welcome to FOSSBilling.\n";
+        echo "\e[34mLast executed (before this run): {$lastExecBefore}.\e[0m" . PHP_EOL;
         echo $success
-            ? "\e[32mSuccessfully ran the cron jobs.\e[0m"
+            ? "\e[32mSuccessfully ran the cron jobs.\e[0m" . PHP_EOL
             : "\e[31mCron jobs finished with failures. Check the logs for details.\e[0m" . PHP_EOL;
     }
 }

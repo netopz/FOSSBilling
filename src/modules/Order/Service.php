@@ -274,6 +274,11 @@ class Service implements InjectionAwareInterface
             return;
         }
 
+        // RedBean DI was removed after the Doctrine Order migration.
+        if (!isset($this->di['db'])) {
+            throw new \FOSSBilling\Exception('Legacy ClientOrder persistence is unavailable');
+        }
+
         $this->di['db']->store($order);
     }
 
@@ -284,6 +289,11 @@ class Service implements InjectionAwareInterface
     private function syncLegacyOrderServiceId(int $orderId, int $serviceId): void
     {
         if ($serviceId <= 0) {
+            return;
+        }
+
+        // No-op when RedBean is gone — Doctrine already owns service_id.
+        if (!isset($this->di['db'])) {
             return;
         }
 
@@ -300,6 +310,10 @@ class Service implements InjectionAwareInterface
     {
         if ($order instanceof \Model_ClientOrder) {
             return $order;
+        }
+
+        if (!isset($this->di['db'])) {
+            throw new \FOSSBilling\Exception('Order compatibility model not found');
         }
 
         $legacyOrder = $this->di['db']->getExistingModelById('ClientOrder', $this->orderId($order));

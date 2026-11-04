@@ -2032,11 +2032,11 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface, FOS
             if ($orderId <= 0) {
                 continue;
             }
-            $order = $this->di['db']->load('ClientOrder', $orderId);
-            if (!$order instanceof \Model_ClientOrder) {
+            $order = $this->di['em']->getRepository(\Box\Mod\Order\Entity\Order::class)->find($orderId);
+            if (!$order instanceof \Box\Mod\Order\Entity\Order) {
                 continue;
             }
-            $status = (string) ($order->status ?? '');
+            $status = (string) ($order->getStatus() ?? '');
             if (!in_array($status, ['pending_setup', 'failed_setup', 'pending'], true)) {
                 continue;
             }
