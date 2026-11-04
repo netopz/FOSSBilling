@@ -4009,33 +4009,14 @@ class Service implements InjectionAwareInterface
     }
 
     /**
-     * True when this invoice includes a domain order that needs registrar
-     * provisioning (register/transfer). Those invoices use Stripe manual
-     * capture so funds are held until registration succeeds (or staff captures).
+     * Vioflare captures Stripe PaymentIntents immediately (automatic capture)
+     * for domain and hosting invoices. Domain registration / hosting activate
+     * run after the invoice is marked paid — not behind a card hold.
+     *
+     * Kept as a hook for adapters; always false for storefront intents.
      */
     public function invoiceRequiresManualCapture(Invoice $invoice): bool
     {
-        $itemService = $this->di['mod_service']('Invoice', 'InvoiceItem');
-        $items = $this->getInvoiceItemRepository()->findByInvoiceId((int) $invoice->getId());
-        foreach ($items as $item) {
-            try {
-                $orderId = $itemService->getOrderId($item);
-            } catch (\Throwable) {
-                continue;
-            }
-            if ($orderId <= 0) {
-                continue;
-            }
-            $order = $this->di['em']->getRepository(Order::class)->find($orderId);
-            if (!$order instanceof Order) {
-                continue;
-            }
-            $serviceType = strtolower((string) ($order->getServiceType() ?? ''));
-            if ($serviceType === 'domain' || $serviceType === 'servicedomain') {
-                return true;
-            }
-        }
-
         return false;
     }
 
@@ -4046,8 +4027,8 @@ class Service implements InjectionAwareInterface
      * here — the invoice_id metadata on the PaymentIntent is what links the
      * webhook back to this invoice.
      *
-     * Domain invoices request capture_method=manual so authorization holds
-     * funds until registrar provisioning succeeds (or an admin captures).
+     * Intents use automatic capture and setup_future_usage so the card is
+     * charged in full and saved on the Stripe customer for renewals.
      *
      * @return array{client_secret: string, publishable_key: string, test_mode: bool, gateway_id: int, capture_method?: string}
      */
@@ -4072,10 +4053,9 @@ class Service implements InjectionAwareInterface
     /**
      * Reconcile a Stripe PaymentIntent after SPA confirmPayment().
      *
-     * - Automatic capture (succeeded): mark invoice paid as before.
-     * - Manual capture (requires_capture): try domain activate first; capture
-     *   only on success. On registrar failure, leave the hold and return
-     *   needs_admin without charging.
+     * Automatic capture (succeeded): mark invoice paid and activate linked
+     * orders. Legacy manual-capture intents (requires_capture) still go through
+     * finalizeAuthorizedPaymentIntent when present.
      *
      * @return array{success: bool, status: string, payment_intent_id: string, authorized?: bool, captured?: bool, needs_admin?: bool, provision_error?: string}
      */
@@ -4099,7 +4079,7 @@ class Service implements InjectionAwareInterface
         $gtw = $this->resolveEnabledStripeGateway($gatewayId);
         $adapter = $payGatewayService->getPaymentAdapter($gtw, $invoice);
 
-        // Prefer authorize→provision→capture when the adapter supports it.
+        // Handles both succeeded (auto-capture) and legacy requires_capture holds.
         if (method_exists($adapter, 'finalizeAuthorizedPaymentIntent')) {
             return $adapter->finalizeAuthorizedPaymentIntent($invoice, $paymentIntentId);
         }

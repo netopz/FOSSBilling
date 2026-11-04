@@ -1776,19 +1776,23 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface, FOS
      * critically, both stamp the invoice_id/client_id/gateway_id metadata the
      * webhook (ipn.php) relies on to mark the invoice paid.
      *
-     * When $manualCapture is true (domain registration invoices), Stripe holds
-     * funds (requires_capture) until FOSSBilling captures after registrar
-     * success — or an admin captures later. Authorization holds typically last
-     * ~7 days for cards.
+     * When $manualCapture is true (legacy path only), Stripe holds funds until
+     * capture. Vioflare storefront intents use automatic capture so domain and
+     * hosting invoices are charged in full on confirm, then activated after pay.
+     *
+     * Always attaches a Stripe Customer and setup_future_usage=off_session so
+     * the card can be reused for renewals (default PM set on reconcile).
      *
      * @return array{0: array, 1: string}
      */
     private function _oneTimeIntentParams(Invoice $invoice, bool $manualCapture = false): array
     {
+        $customerId = $this->getOrCreateCustomer($invoice);
         $intentParams = [
             'amount' => $this->getAmountInMinorUnits($invoice),
             'currency' => strtolower((string) $invoice->getCurrency()),
             'description' => $this->getInvoiceTitle($invoice),
+            'customer' => $customerId,
             'automatic_payment_methods' => ['enabled' => true],
             'receipt_email' => $invoice->getBuyerEmail(),
             'metadata' => [
@@ -1797,6 +1801,12 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface, FOS
                 'gateway_id' => (string) $this->config['gateway_id'],
             ],
         ];
+        // Save the card for renewals. Incompatible with manual capture — only
+        // set on the automatic (full charge) path Vioflare uses in production.
+        if (!$manualCapture) {
+            $intentParams['setup_future_usage'] = 'off_session';
+            $intentParams['metadata']['save_payment_method'] = '1';
+        }
         if ($manualCapture) {
             $intentParams['capture_method'] = 'manual';
             $intentParams['metadata']['manual_capture'] = '1';
@@ -2145,8 +2155,45 @@ class Payment_Adapter_Stripe implements FOSSBilling\InjectionAwareInterface, FOS
         $this->di['em']->flush();
 
         $this->applyOneTimePayment($tx, $invoice instanceof Invoice ? $invoice : null, $paymentIntent);
+        $this->rememberPaymentMethodForRenewals($paymentIntent);
 
         return true;
+    }
+
+    /**
+     * Persist the charged card on the Stripe customer as the default payment
+     * method so renewals can charge off_session without asking for the card again.
+     */
+    private function rememberPaymentMethodForRenewals(object $paymentIntent): void
+    {
+        try {
+            $customerId = $paymentIntent->customer ?? null;
+            if (is_object($customerId)) {
+                $customerId = $customerId->id ?? null;
+            }
+            $paymentMethodId = $paymentIntent->payment_method ?? null;
+            if (is_object($paymentMethodId)) {
+                $paymentMethodId = $paymentMethodId->id ?? null;
+            }
+            if (!is_string($customerId) || $customerId === '' || !is_string($paymentMethodId) || $paymentMethodId === '') {
+                return;
+            }
+
+            // setup_future_usage attaches the PM; ensure it is the default for renewals.
+            $this->stripe->customers->update($customerId, [
+                'invoice_settings' => [
+                    'default_payment_method' => $paymentMethodId,
+                ],
+            ]);
+
+            $clientId = (int) ($paymentIntent->metadata->client_id ?? 0);
+            $gatewayId = (int) ($paymentIntent->metadata->gateway_id ?? ($this->config['gateway_id'] ?? 0));
+            if ($clientId > 0 && $gatewayId > 0) {
+                $this->cacheGatewayCustomer($gatewayId, $clientId, $customerId);
+            }
+        } catch (Throwable $e) {
+            error_log('Failed to save Stripe payment method for renewals: ' . $e->getMessage());
+        }
     }
 
     protected function _generateForm(Invoice $invoice): string
